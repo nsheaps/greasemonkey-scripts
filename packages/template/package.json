@@ -1,0 +1,14 @@
+{
+  "name": "@greasemonkey-scripts/template",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "lint": "oxlint",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "devDependencies": {
+    "@types/greasemonkey": "~4.0.7",
+    "typescript": "~5.8.3"
+  }
+}

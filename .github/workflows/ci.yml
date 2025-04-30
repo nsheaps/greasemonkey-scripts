@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "yarn"
+      - name: Set up corepack
+        run: corepack enable && corepack install
+      - name: Install dependencies
+        run: yarn install --immutable
+      - name: Build
+        run: yarn run build
+    #   - name: Create Release
+    #     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    #     run: |
+    #       git config --global user.name "GitHub Actions"
+    #       git config --global user.email "actions@github.com"
+    #       yarn changeset version
+    #       git add .
+    #       git commit -m "chore: version packages"
+    #       git push
+    #       yarn changeset publish

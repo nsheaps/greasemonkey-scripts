@@ -1,0 +1,13 @@
+{
+  "name": "@greasemonkey-scripts/_template",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc --build",
+    "lint": "oxlint"
+  },
+  "devDependencies": {
+    "@types/greasemonkey": "~4.0.7",
+    "typescript": "~5.8.3"
+  }
+}

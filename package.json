@@ -1,0 +1,25 @@
+{
+  "name": "greasemonkey-scripts",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "nx run-many --target=build --all",
+    "lint": "nx run-many --target=lint --all",
+    "test": "nx run-many --target=test --all",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "changeset publish"
+  },
+  "devDependencies": {
+    "@changesets/cli": "~2.29.2",
+    "nx": "~20.8.1",
+    "oxlint": "~0.16.8",
+    "typescript": "~5.8.3"
+  },
+  "packageManager": "yarn@4.9.1+sha512.f95ce356460e05be48d66401c1ae64ef84d163dd689964962c6888a9810865e39097a5e9de748876c2e0bf89b232d583c33982773e9903ae7a76257270986538",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
