@@ -365,6 +365,24 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@nsheaps/gm-github-to-graphite-button@workspace:packages/github-to-graphite-button":
+  version: 0.0.0-use.local
+  resolution: "@nsheaps/gm-github-to-graphite-button@workspace:packages/github-to-graphite-button"
+  dependencies:
+    "@types/greasemonkey": "npm:~4.0.7"
+    typescript: "npm:~5.8.3"
+  languageName: unknown
+  linkType: soft
+
+"@nsheaps/gm-graphite-to-github-button@workspace:packages/graphite-to-github-button":
+  version: 0.0.0-use.local
+  resolution: "@nsheaps/gm-graphite-to-github-button@workspace:packages/graphite-to-github-button"
+  dependencies:
+    "@types/greasemonkey": "npm:~4.0.7"
+    typescript: "npm:~5.8.3"
+  languageName: unknown
+  linkType: soft
+
 "@nx/nx-darwin-arm64@npm:20.8.1":
   version: 20.8.1
   resolution: "@nx/nx-darwin-arm64@npm:20.8.1"
