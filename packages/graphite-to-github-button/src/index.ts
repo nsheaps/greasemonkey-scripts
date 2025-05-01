@@ -41,7 +41,7 @@ const addButton = (toolbar: HTMLElement) => {
 };
 
 const toolbarObserver = new MutationObserver((_, observer) => {
-  const toolbar = document.querySelector(SELECTOR);
+  const toolbar = document.querySelector(SELECTOR) as HTMLElement;
   if (toolbar) {
     observer.disconnect();
     addButton(toolbar);
