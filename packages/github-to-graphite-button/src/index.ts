@@ -16,8 +16,11 @@
 const PATH_REGEX = /^\/([^\/]+)\/([^\/]+)\/pull\/([^\/]+).*$/;
 const SELECTOR = '[class^="gh-header-actions"]';
 
-const addButton = (toolbar) => {
-  const [_, org, repo, pr] = window.location.pathname.match(PATH_REGEX);
+const addButton = (toolbar: HTMLElement) => {
+  const match = window.location.pathname.match(PATH_REGEX);
+  if (!match) return;
+  
+  const [_, org, repo, pr] = match;
   const graphiteLink = `https://app.graphite.dev/github/pr/${org}/${repo}/${pr}/`;
 
   if (document.getElementById("graphiteLink") != null) {
@@ -42,7 +45,7 @@ const toolbarObserver = new MutationObserver((_, observer) => {
   }
 });
 
-let lastPathname;
+let lastPathname: string | undefined;
 const routeChangeObserver = new MutationObserver(() => {
   const { pathname } = window.location;
 
