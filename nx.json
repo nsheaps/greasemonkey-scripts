@@ -3,6 +3,9 @@
   "affected": {
     "defaultBase": "main"
   },
+  "namedInputs": {
+    "default": ["{projectRoot}/**/*"]
+  },
   "tasksRunnerOptions": {
     "default": {
       "runner": "nx/tasks-runners/default",
@@ -21,8 +24,7 @@
         "^build"
       ],
       "inputs": [
-        "production",
-        "^production"
+        "{projectRoot}/src/**/*"
       ],
       "outputs": [
         "{projectRoot}/dist"
