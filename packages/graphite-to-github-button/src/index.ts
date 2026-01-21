@@ -16,8 +16,11 @@ const PATH_REGEX = /^\/github\/pr\/([^\/]+)\/([^\/]+)\/([^\/]+).*$/;
 const SELECTOR =
   '[class^="PullRequestTitleBar_container_"] > div:nth-child(1) > div:nth-child(2)';
 
-const addButton = (toolbar) => {
-  const [_, org, repo, pr] = window.location.pathname.match(PATH_REGEX);
+const addButton = (toolbar: HTMLElement) => {
+  const match = window.location.pathname.match(PATH_REGEX);
+  if (!match) return;
+  
+  const [_, org, repo, pr] = match;
   const gitHubLink = `https://github.com/${org}/${repo}/pull/${pr}`;
 
   if (document.getElementById("gitHubLink") != null) {
@@ -38,14 +41,14 @@ const addButton = (toolbar) => {
 };
 
 const toolbarObserver = new MutationObserver((_, observer) => {
-  const toolbar = document.querySelector(SELECTOR);
+  const toolbar = document.querySelector(SELECTOR) as HTMLElement;
   if (toolbar) {
     observer.disconnect();
     addButton(toolbar);
   }
 });
 
-let lastPathname;
+let lastPathname: string | undefined;
 const routeChangeObserver = new MutationObserver(() => {
   const { pathname } = window.location;
 
