@@ -9,6 +9,6 @@
   },
   "devDependencies": {
     "@types/greasemonkey": "~4.0.7",
-    "typescript": "~5.8.3"
+    "typescript": "~5.9.3"
   }
 }
