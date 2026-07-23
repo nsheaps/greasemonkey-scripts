@@ -1322,7 +1322,7 @@ __metadata:
   resolution: "greasemonkey-scripts@workspace:."
   dependencies:
     "@changesets/cli": "npm:~2.31.0"
-    nx: "npm:~23.0.0"
+    nx: "npm:~23.0.1"
     oxlint: "npm:~1.71.0"
     typescript: "npm:~6.0.3"
   languageName: unknown
@@ -1680,7 +1680,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"nx@npm:~23.0.0":
+"nx@npm:~23.0.1":
   version: 23.0.2
   resolution: "nx@npm:23.0.2"
   dependencies:
