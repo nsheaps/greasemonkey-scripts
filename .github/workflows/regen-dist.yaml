@@ -1,0 +1,113 @@
+name: Regenerate Compiled Userscript
+
+# Keeps packages/graphite-to-github-button/dist/script.user.js in sync with
+# its TypeScript source on every push to main. dist/ is gitignored
+# workspace-wide, but this one file is force-committed because Greasy
+# Fork's sync mechanism points at a stable raw.githubusercontent.com URL
+# for it — see the package's own history (4fc2806 renamed the raw .ts
+# source straight to this path without ever compiling it; this workflow
+# exists so that class of bug can't silently recur).
+#
+# Loop safety (same pattern as nsheaps/github-actions' sync-plugin-specs
+# reusable workflow): two independent layers —
+#   1. The `paths` filter below only matches the package's source/config
+#      files, not its dist/ output, so the bot's own commit (which only
+#      touches dist/script.user.js) can't re-trigger this workflow.
+#   2. The commit step only runs `git commit`/`push` when the rebuild
+#      actually produced a diff. Rebuilding from unchanged source is
+#      deterministic, so even a manual workflow_dispatch re-run right
+#      after a bot commit is a no-op.
+#
+# main is protected by an active `require-pr` ruleset with no bypass actors,
+# so a plain `git push` straight to main always fails here. This follows the
+# same "try direct push, fall back to PR" idiom as nsheaps/github-actions'
+# sync-main-to-edge reusable workflow: attempt the push, and only if branch
+# protection rejects it, push to a branch and open a PR via that repo's
+# open-pr-if-needed composite action (idempotent — reuses an already-open PR
+# instead of piling up duplicates).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/graphite-to-github-button/src/**"
+      - "packages/graphite-to-github-button/package.json"
+      - "packages/graphite-to-github-button/tsconfig.json"
+      - "tsconfig.base.json"
+      - ".github/workflows/regen-dist.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Serialize per-ref so a fast follow-up push waits for the in-flight run
+  # instead of racing it on the same branch.
+  group: regen-dist-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  regen:
+    name: Rebuild dist/script.user.js
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: ".nvmrc"
+
+      - name: Set up corepack
+        run: corepack enable && corepack install
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Build package
+        run: yarn workspace @nsheaps/gm-graphite-to-github-button run build
+
+      - name: Stage regenerated dist output if it changed
+        id: stage
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f packages/graphite-to-github-button/dist/script.user.js
+          if git diff --cached --quiet; then
+            echo "dist/script.user.js already up to date; nothing to commit."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git commit -m "chore(graphite-to-github-button): regenerate compiled userscript"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Try direct push to main
+        if: steps.stage.outputs.changed == 'true'
+        id: push
+        continue-on-error: true
+        run: git push origin HEAD:main
+
+      - name: Push to a branch if direct push was blocked
+        if: steps.stage.outputs.changed == 'true' && steps.push.outcome == 'failure'
+        id: branch
+        env:
+          BRANCH: bot/regen-dist-graphite-to-github-button
+        run: |
+          git push -f origin "HEAD:refs/heads/${BRANCH}"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Open PR if direct push was blocked
+        if: steps.stage.outputs.changed == 'true' && steps.push.outcome == 'failure'
+        uses: nsheaps/github-actions/.github/actions/open-pr-if-needed@main
+        with:
+          title: "chore(graphite-to-github-button): regenerate compiled userscript"
+          body: |
+            Direct push to `main` was blocked by branch protection, so the
+            regenerated `dist/script.user.js` is going through a PR instead.
+          base: main
+          head: ${{ steps.branch.outputs.branch }}
+          token: ${{ secrets.GITHUB_TOKEN }}

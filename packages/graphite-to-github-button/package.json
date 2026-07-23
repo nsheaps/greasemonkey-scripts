@@ -3,7 +3,7 @@
   "version": "0.3.3",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc --build",
+    "build": "tsc --build && node -e \"require('fs').copyFileSync('dist/index.js', 'dist/script.user.js')\"",
     "lint": "oxlint"
   },
   "devDependencies": {

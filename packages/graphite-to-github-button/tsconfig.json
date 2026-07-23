@@ -2,7 +2,23 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "./dist",
-    "rootDir": "./src"
+    "rootDir": "./src",
+    // This package's src/index.ts has no import/export statements, so tsc
+    // treats it as a global script rather than a module and (because
+    // "strict" implies "alwaysStrict") prepends a `"use strict";` line to
+    // the compiled output. That line would sit above the
+    // `// ==UserScript==` header block that Greasy Fork/userscript managers
+    // scan for, which is meant to be the first thing in the file. Disable
+    // just this sub-flag so the compiled dist/script.user.js starts with
+    // the header, matching the original hand-written source.
+    "alwaysStrict": false,
+    // dist/script.user.js is the only build artifact committed and served
+    // (via a stable raw.githubusercontent.com URL) to Greasy Fork; the
+    // sibling index.js.map is not shipped alongside it. Skip emitting a
+    // sourceMap for this package so the compiled output doesn't end with a
+    // `//# sourceMappingURL=...` comment pointing at a file that won't be
+    // there for end users.
+    "sourceMap": false
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
