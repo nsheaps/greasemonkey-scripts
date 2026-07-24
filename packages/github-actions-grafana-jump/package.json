@@ -1,0 +1,15 @@
+{
+  "name": "@nsheaps/gm-github-actions-grafana-jump",
+  "version": "0.1.0",
+  "main": "dist/index.js",
+  "private": true,
+  "scripts": {
+    "build": "tsc --build",
+    "lint": "oxlint",
+    "test": "tsc --build && node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "@types/greasemonkey": "~4.0.7",
+    "typescript": "~5.8.3"
+  }
+}
