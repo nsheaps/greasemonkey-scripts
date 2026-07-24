@@ -3,7 +3,11 @@
     "target": "ES2020",
     "module": "ESNext",
     "lib": ["ES2020", "DOM"],
-    "moduleResolution": "node",
+    // "node" (an alias for the legacy "node10" strategy) is deprecated as of
+    // TypeScript 6.0 and will stop functioning in 7.0 (TS5107). "bundler" is
+    // the modern pairing for `module: ESNext`; no package in this repo does
+    // external module imports, so this has no effect on compiled output.
+    "moduleResolution": "bundler",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,

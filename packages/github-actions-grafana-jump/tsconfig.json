@@ -2,7 +2,13 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "./dist",
-    "rootDir": "./src"
+    "rootDir": "./src",
+    // This is the only package that references ambient globals from
+    // @types/node (the `module` test-export guard) and @types/greasemonkey
+    // (`GM`). Under moduleResolution: bundler, tsc does not auto-include
+    // these from node_modules/@types the way it does under "node"/"node10" -
+    // list them explicitly rather than relying on that auto-discovery.
+    "types": ["node", "greasemonkey"]
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
