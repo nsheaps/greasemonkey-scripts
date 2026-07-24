@@ -1,0 +1,144 @@
+name: Regenerate Compiled Userscripts
+
+# Keeps every package's committed dist/*.user.js in sync with its TypeScript
+# source. dist/ is gitignored workspace-wide, but each package that publishes
+# a userscript force-commits its dist/*.user.js because Greasy Fork's sync
+# mechanism points at a stable raw.githubusercontent.com URL for it — see
+# graphite-to-github-button's history (4fc2806 renamed the raw .ts source
+# straight to this path without ever compiling it; this workflow exists so
+# that class of bug can't silently recur, now for every package, not just
+# that one).
+#
+# This repo is an Nx monorepo (yarn workspaces "packages/*", nx.json's
+# "build" target cached per-project). Rather than hardcoding one package's
+# build command, this always builds every project (`yarn run build`, i.e.
+# `nx run-many --target=build --all` — the same command ci.yml already
+# runs) and then stages whatever dist/*.user.js artifacts actually changed.
+# We intentionally skip `nx affected` here: computing a correct base/head
+# for a push-triggered affected run adds real complexity (fetch-depth,
+# first-push-to-a-branch edge cases), and with only a handful of packages a
+# full build is cheap. Revisit if the package count grows enough that this
+# stops being true.
+#
+# Loop safety (same pattern as nsheaps/github-actions' sync-plugin-specs
+# reusable workflow): two independent layers —
+#   1. The `paths` filter below matches any package's source/config files
+#      but excludes packages/**/dist/**, so the bot's own commit (which
+#      only touches dist/*.user.js files) can't re-trigger this workflow.
+#   2. The staging step only commits/pushes when the rebuild actually
+#      changed a tracked dist/*.user.js. Rebuilding from unchanged source
+#      is deterministic, so even a manual workflow_dispatch re-run right
+#      after a bot commit is a no-op.
+#
+# Only packages that actually produce a dist/*.user.js are ever staged —
+# packages/_template and packages/template build fine (same as in ci.yml)
+# but produce no *.user.js output, so they're naturally never touched by
+# the staging step below; no special-casing needed. Likewise,
+# github-actions-grafana-jump builds fine but has no *.user.js output of
+# its own yet either.
+#
+# main is protected by an active `require-pr` ruleset. This repo's
+# settings.yml grants the org automation GitHub App an always-exemption
+# (bypass_mode: always) on that ruleset — same as repo admins — so
+# authenticating as that app via checkout-as-app (the same action
+# apply-repo-settings.yaml uses) should let this push straight to main.
+# The branch+PR fallback below is kept as defense-in-depth: the live
+# ruleset hasn't been confirmed to actually reflect that settings.yml
+# exemption yet (see task #45's bypass_actors sync-gap investigation),
+# so if the push is still rejected, this falls back to the same
+# "try direct push, fall back to PR" idiom as nsheaps/github-actions'
+# sync-main-to-edge reusable workflow, opening a PR via that repo's
+# open-pr-if-needed composite action (idempotent — reuses an already-open PR
+# instead of piling up duplicates).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/**"
+      - "!packages/**/dist/**"
+      - "tsconfig.base.json"
+      - ".github/workflows/regen-userscripts.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Serialize per-ref so a fast follow-up push waits for the in-flight run
+  # instead of racing it on the same branch.
+  group: regen-userscripts-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  regen:
+    name: Rebuild compiled userscripts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout as automation bot
+        uses: nsheaps/github-actions/.github/actions/checkout-as-app@main
+        with:
+          app-id: ${{ secrets.AUTOMATION_GITHUB_APP_ID }}
+          private-key: ${{ secrets.AUTOMATION_GITHUB_APP_PRIVATE_KEY }}
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: ".nvmrc"
+
+      - name: Set up corepack
+        run: corepack enable && corepack install
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Build all packages
+        run: yarn run build
+
+      - name: Stage regenerated userscripts if any changed
+        id: stage
+        run: |
+          mapfile -t USER_SCRIPTS < <(find packages -maxdepth 3 -type f -path "*/dist/*.user.js")
+          if [ "${#USER_SCRIPTS[@]}" -eq 0 ]; then
+            echo "No packages/*/dist/*.user.js build artifacts found; nothing to stage."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git add -f "${USER_SCRIPTS[@]}"
+          if git diff --cached --quiet; then
+            echo "Compiled userscripts already up to date; nothing to commit."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git commit -m "chore: regenerate compiled userscripts"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Try direct push to main
+        if: steps.stage.outputs.changed == 'true'
+        id: push
+        continue-on-error: true
+        run: git push origin HEAD:main
+
+      - name: Push to a branch if direct push was blocked
+        if: steps.stage.outputs.changed == 'true' && steps.push.outcome == 'failure'
+        id: branch
+        env:
+          BRANCH: bot/regen-userscripts
+        run: |
+          git push -f origin "HEAD:refs/heads/${BRANCH}"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Open PR if direct push was blocked
+        if: steps.stage.outputs.changed == 'true' && steps.push.outcome == 'failure'
+        uses: nsheaps/github-actions/.github/actions/open-pr-if-needed@main
+        with:
+          title: "chore: regenerate compiled userscripts"
+          body: |
+            Direct push to `main` was blocked, so the regenerated
+            compiled userscript(s) are going through a PR instead.
+          base: main
+          head: ${{ steps.branch.outputs.branch }}
+          token: ${{ secrets.GITHUB_TOKEN }}
