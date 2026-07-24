@@ -2,7 +2,13 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "./dist",
-    "rootDir": "./src"
+    "rootDir": "./src",
+    // This is the only package that references ambient globals from
+    // @types/node (the `module` test-export guard) and @types/greasemonkey
+    // (`GM.setValue`/`GM.getValue`) - list them explicitly rather than
+    // relying on tsc's automatic @types discovery, which doesn't reliably
+    // pick these up for every moduleResolution setting.
+    "types": ["node", "greasemonkey"]
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
