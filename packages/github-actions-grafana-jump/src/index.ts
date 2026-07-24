@@ -1,62 +1,111 @@
 // ==UserScript==
 // @name        GitHub Actions => Grafana jump button
-// @description Add a button on github.com Actions pages (PR checks, branch-filtered runs, a single workflow's runs, and runner detail pages) that jumps to the matching Grafana drill-down dashboard
+// @description Add a button on github.com Actions pages (PR checks, branch-filtered runs, a single workflow's runs, and runner detail pages) that jumps to a matching Grafana drill-down dashboard you configure yourself
 // @match       http*://www.github.com/*
 // @match       http*://github.com/*
-// @version      0.1.0
+// @version      0.2.0
 // @run-at      document-start
 // @icon         data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==
-// @grant        none
+// @grant        GM.setValue
+// @grant        GM.getValue
 // @license      MIT
 // @namespace https://www.github.com
 // ==/UserScript==
 //
-// NOTE: This script is internal to Oura's infrastructure (it links to an internal
-// Grafana instance) and is intentionally NOT published to GreasyFork. Do not add
-// @downloadURL/@updateURL or wire this package into the changeset/publish flow.
+// Fully generic: no Grafana instance, dashboard UID, or template-variable name is
+// baked in. On first use (or whenever nothing configured applies to the current
+// page) the jump button opens an in-page configuration panel where you enter your
+// own Grafana base URL and one or more dashboards, each with the template-variable
+// names it uses for filtering by branch / PR number / workflow file / runner. Once
+// configured, the button jumps straight to the matching dashboard, with a small
+// "▾" menu to pick among multiple configured dashboards or to reopen the config
+// panel. Config is persisted via GM.setValue/GM.getValue, scoped to this script.
+//
+// The `var-<name>=<value>` query-param convention used to preset a Grafana
+// dashboard's template variables from a URL is a genuine, documented Grafana
+// feature (see
+// https://grafana.com/docs/grafana/latest/dashboards/build-dashboards/create-dashboard-url-variables/);
+// what's dashboard-specific is only the variable *name* each dashboard happens to
+// use, which you can find in the Grafana UI (dashboard settings -> Variables) or
+// by exporting the dashboard JSON (e.g. with the `gcx` CLI).
+
+// ---------------------------------------------------------------------------
+// Config types. A GrafanaJumpConfig is entirely user-supplied (see the config
+// panel below) and persisted as-is; there is no shipped default.
+// ---------------------------------------------------------------------------
+
+interface DashboardVarNames {
+  branch?: string;
+  prNumber?: string;
+  workflowName?: string;
+  runnerName?: string;
+}
+
+interface DashboardConfig {
+  name: string;
+  uid: string;
+  slug: string;
+  varNames: DashboardVarNames;
+}
+
+interface GrafanaJumpConfig {
+  baseUrl: string;
+  dashboards: DashboardConfig[];
+}
+
+function defaultConfig(): GrafanaJumpConfig {
+  return { baseUrl: "", dashboards: [] };
+}
 
 /**
- * Grafana jump-button configuration.
- *
- * `baseUrl` and the dashboard `uid`s below are REAL and confirmed: they come from
- * live links recorded in existing internal docs that catalog the "App Developers"
- * Grafana folder (ADX-89 research/planning notes), not guesses.
- *   - `ciDevxReport` ("CI/DevX report dashboard") is built on Tempo/TraceQL GitHub
- *     Actions workflow+job spans and has per-run PR CI runtime, so it's the best fit
- *     for drilling into one PR/branch or one workflow's runs across branches.
- *   - `androidIosCi` ("Android & iOS CI") covers runner health and queue time, so
- *     it's the best fit for a single runner's activity.
- *
- * `varNames` is NOT confirmed. Nobody has pulled the dashboard JSON to verify the
- * actual Grafana template-variable names these dashboards use for filtering by
- * branch / PR number / workflow / runner - the values below are reasonable-looking
- * placeholders only. The `var-` query-param prefix itself is a genuine, documented
- * Grafana URL convention (see https://grafana.com/docs/grafana/latest/dashboards/build-dashboards/create-dashboard-url-variables/);
- * what's unverified is just the variable *name* string for each of these three
- * dashboards. Confirm via the Grafana UI (dashboard settings -> Variables) or by
- * exporting the dashboard JSON (e.g. with the `gcx` CLI) and drop this comment +
- * the TODOs below once confirmed.
+ * Defensively reshapes a value loaded from storage (or pasted/hand-edited) into
+ * a well-formed GrafanaJumpConfig, dropping anything malformed rather than
+ * throwing. Keeps the rest of the script free of null/undefined-shape checks.
  */
-const GRAFANA_CONFIG = {
-  baseUrl: "https://monitoring.oura.cloud",
-  dashboards: {
-    ciDevxReport: { uid: "pagrf6j", slug: "ci-devx-report-dashboard" },
-    androidIosCi: { uid: "pap5g6z", slug: "android-ios-ci" },
-  },
-  // TODO(nathan): confirm these against the live dashboards' actual template
-  // variable names - these are placeholders, not verified.
-  varNames: {
-    branch: "branch",
-    prNumber: "pr_number",
-    workflowName: "workflow_name",
-    runnerName: "runner_name",
-  },
-};
+function normalizeConfig(raw: unknown): GrafanaJumpConfig {
+  if (typeof raw !== "object" || raw === null) return defaultConfig();
+  const obj = raw as Record<string, unknown>;
+
+  const baseUrl = typeof obj.baseUrl === "string" ? obj.baseUrl.trim() : "";
+
+  const dashboardsRaw = Array.isArray(obj.dashboards) ? obj.dashboards : [];
+  const dashboards: DashboardConfig[] = dashboardsRaw
+    .filter((d): d is Record<string, unknown> => typeof d === "object" && d !== null)
+    .map((d) => {
+      const varNamesRaw =
+        typeof d.varNames === "object" && d.varNames !== null
+          ? (d.varNames as Record<string, unknown>)
+          : {};
+      const varNames: DashboardVarNames = {};
+      for (const key of ["branch", "prNumber", "workflowName", "runnerName"] as const) {
+        const value = varNamesRaw[key];
+        if (typeof value === "string" && value.trim() !== "") {
+          varNames[key] = value.trim();
+        }
+      }
+      return {
+        name: typeof d.name === "string" ? d.name.trim() : "",
+        uid: typeof d.uid === "string" ? d.uid.trim() : "",
+        slug: typeof d.slug === "string" ? d.slug.trim() : "",
+        varNames,
+      };
+    })
+    // A dashboard with no uid can't be jumped to; drop it rather than emit a
+    // broken link.
+    .filter((d) => d.uid !== "");
+
+  return { baseUrl, dashboards };
+}
+
+/** True once there's at least a base URL and one dashboard to jump to. */
+function isConfigured(config: GrafanaJumpConfig): boolean {
+  return config.baseUrl !== "" && config.dashboards.length > 0;
+}
 
 // ---------------------------------------------------------------------------
 // Pure logic: parsing the current location into a jump context, and building
-// the resulting Grafana URL. Kept free of DOM access so it can be unit tested
-// directly (see test/grafana-jump.test.js).
+// the resulting Grafana URL. Kept free of DOM/GM access so it can be unit
+// tested directly (see test/grafana-jump.test.js).
 // ---------------------------------------------------------------------------
 
 interface PrContext {
@@ -185,11 +234,51 @@ function resolveJumpContext(pathname: string, search: string): JumpContext | nul
   );
 }
 
+/** Which DashboardVarNames key a given context kind is filtered by. */
+function contextVarKey(kind: JumpContext["kind"]): keyof DashboardVarNames {
+  switch (kind) {
+    case "pr":
+      return "prNumber";
+    case "branch":
+      return "branch";
+    case "workflow":
+      return "workflowName";
+    case "runner":
+      return "runnerName";
+  }
+}
+
+/** The raw filter value (PR number, branch name, etc.) carried by a context. */
+function contextFilterValue(context: JumpContext): string {
+  switch (context.kind) {
+    case "pr":
+      return context.prNumber;
+    case "branch":
+      return context.branch;
+    case "workflow":
+      return context.workflowFile;
+    case "runner":
+      return context.runnerId;
+  }
+}
+
+/**
+ * Which of the configured dashboards can actually be jumped to for this
+ * context - i.e. have a template-variable name configured for the field this
+ * context kind filters by. A dashboard with no matching varName is left out
+ * rather than linked to with no filter applied.
+ */
+function applicableDashboards(config: GrafanaJumpConfig, context: JumpContext): DashboardConfig[] {
+  const key = contextVarKey(context.kind);
+  return config.dashboards.filter((dashboard) => Boolean(dashboard.varNames[key]));
+}
+
 /**
  * Builds a Grafana dashboard URL with one or more template variables preset via
  * the `var-<name>=<value>` query convention.
  */
 function buildDashboardUrl(
+  baseUrl: string,
   dashboard: { uid: string; slug: string },
   vars: Record<string, string>,
 ): string {
@@ -197,43 +286,54 @@ function buildDashboardUrl(
     .map(([name, value]) => `var-${encodeURIComponent(name)}=${encodeURIComponent(value)}`)
     .join("&");
   const query = params ? `?${params}` : "";
-  return `${GRAFANA_CONFIG.baseUrl}/d/${dashboard.uid}/${dashboard.slug}${query}`;
+  return `${baseUrl}/d/${dashboard.uid}/${dashboard.slug}${query}`;
 }
 
-/** Builds the Grafana jump URL for a resolved context. */
-function buildGrafanaJumpUrl(context: JumpContext): string {
-  switch (context.kind) {
-    case "pr":
-      return buildDashboardUrl(GRAFANA_CONFIG.dashboards.ciDevxReport, {
-        [GRAFANA_CONFIG.varNames.prNumber]: context.prNumber,
-      });
-    case "branch":
-      return buildDashboardUrl(GRAFANA_CONFIG.dashboards.ciDevxReport, {
-        [GRAFANA_CONFIG.varNames.branch]: context.branch,
-      });
-    case "workflow":
-      return buildDashboardUrl(GRAFANA_CONFIG.dashboards.ciDevxReport, {
-        [GRAFANA_CONFIG.varNames.workflowName]: context.workflowFile,
-      });
-    case "runner":
-      return buildDashboardUrl(GRAFANA_CONFIG.dashboards.androidIosCi, {
-        [GRAFANA_CONFIG.varNames.runnerName]: context.runnerId,
-      });
-  }
+/**
+ * Builds the Grafana jump URL for one dashboard against a resolved context.
+ * Assumes the dashboard is applicable (see applicableDashboards) - callers that
+ * skip that check will just get a link with no var- filter applied.
+ */
+function buildJumpUrl(baseUrl: string, dashboard: DashboardConfig, context: JumpContext): string {
+  const key = contextVarKey(context.kind);
+  const varName = dashboard.varNames[key];
+  const vars = varName ? { [varName]: contextFilterValue(context) } : {};
+  return buildDashboardUrl(baseUrl, dashboard, vars);
 }
 
 /** Human-readable label for the jump button, specific to the matched context. */
 function labelForContext(context: JumpContext): string {
   switch (context.kind) {
     case "pr":
-      return `Grafana: PR #${context.prNumber} CI ↗️`;
+      return `Grafana: PR #${context.prNumber} CI`;
     case "branch":
-      return `Grafana: ${context.branch} CI ↗️`;
+      return `Grafana: ${context.branch} CI`;
     case "workflow":
-      return `Grafana: ${context.workflowFile} runs ↗️`;
+      return `Grafana: ${context.workflowFile} runs`;
     case "runner":
-      return `Grafana: runner ${context.runnerId} ↗️`;
+      return `Grafana: runner ${context.runnerId}`;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Config persistence. Wrapped so the rest of the script only ever deals with a
+// GrafanaJumpConfig object, never the raw JSON-string storage format.
+// ---------------------------------------------------------------------------
+
+const CONFIG_STORAGE_KEY = "grafanaJumpConfig.v1";
+
+async function loadConfig(): Promise<GrafanaJumpConfig> {
+  const raw = await GM.getValue(CONFIG_STORAGE_KEY, "");
+  if (typeof raw !== "string" || raw === "") return defaultConfig();
+  try {
+    return normalizeConfig(JSON.parse(raw));
+  } catch {
+    return defaultConfig();
+  }
+}
+
+async function saveConfig(config: GrafanaJumpConfig): Promise<void> {
+  await GM.setValue(CONFIG_STORAGE_KEY, JSON.stringify(config));
 }
 
 // ---------------------------------------------------------------------------
@@ -251,55 +351,373 @@ function labelForContext(context: JumpContext): string {
 // left to fix) if GitHub reshuffles the page layout again.
 // ---------------------------------------------------------------------------
 
-const BUTTON_ID = "grafanaJumpButton";
+const CONTAINER_ID = "grafanaJumpContainer";
+
+const BUTTON_STYLE =
+  "display: inline-block; background: #F55F0E; color: #fff; padding: 8px 12px; " +
+  "border: none; border-radius: 6px 0 0 6px; font-size: 12px; font-weight: 600; " +
+  "font-family: inherit; text-decoration: none; cursor: pointer; vertical-align: top;";
+
+const TOGGLE_STYLE =
+  "display: inline-block; background: #c94c0a; color: #fff; padding: 8px 8px; " +
+  "border: none; border-left: 1px solid rgba(255,255,255,0.3); border-radius: 0 6px 6px 0; " +
+  "font-size: 12px; font-family: inherit; cursor: pointer; vertical-align: top;";
+
+const SOLO_BUTTON_STYLE =
+  "display: inline-block; background: #57606a; color: #fff; padding: 8px 12px; " +
+  "border: none; border-radius: 6px; font-size: 12px; font-weight: 600; " +
+  "font-family: inherit; text-decoration: none; cursor: pointer;";
+
+const MENU_STYLE =
+  "position: absolute; bottom: 100%; right: 0; margin-bottom: 4px; background: #fff; " +
+  "color: #24292f; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.25); " +
+  "min-width: 180px; overflow: hidden; font-family: inherit;";
+
+const MENU_ITEM_STYLE =
+  "display: block; padding: 8px 12px; font-size: 12px; text-decoration: none; " +
+  "color: inherit; white-space: nowrap; cursor: pointer; background: none; " +
+  "border: none; width: 100%; text-align: left; box-sizing: border-box;";
+
+let currentConfig: GrafanaJumpConfig = defaultConfig();
+
+function closeMenu(): void {
+  document.getElementById(`${CONTAINER_ID}-menu`)?.remove();
+}
+
+function openMenu(
+  anchorContainer: HTMLElement,
+  items: Array<{ label: string; onClick: () => void }>,
+): void {
+  closeMenu();
+  const menu = document.createElement("div");
+  menu.id = `${CONTAINER_ID}-menu`;
+  menu.setAttribute("style", MENU_STYLE);
+
+  for (const item of items) {
+    const entry = document.createElement("button");
+    entry.type = "button";
+    entry.textContent = item.label;
+    entry.setAttribute("style", MENU_ITEM_STYLE);
+    entry.addEventListener("mouseenter", () => {
+      entry.style.background = "#f6f8fa";
+    });
+    entry.addEventListener("mouseleave", () => {
+      entry.style.background = "none";
+    });
+    entry.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeMenu();
+      item.onClick();
+    });
+    menu.appendChild(entry);
+  }
+
+  anchorContainer.appendChild(menu);
+
+  // Close on next outside click. Deferred so this listener doesn't also catch
+  // the very click that opened the menu.
+  setTimeout(() => {
+    document.addEventListener("click", closeMenu, { once: true });
+  }, 0);
+}
+
+function openConfigModal(): void {
+  closeMenu();
+
+  // Work on a deep-ish draft copy so Cancel leaves the saved config untouched.
+  const draft: GrafanaJumpConfig = {
+    baseUrl: currentConfig.baseUrl,
+    dashboards: currentConfig.dashboards.map((d) => ({ ...d, varNames: { ...d.varNames } })),
+  };
+
+  const overlay = document.createElement("div");
+  overlay.setAttribute(
+    "style",
+    "position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 2147483646; " +
+      "display: flex; align-items: center; justify-content: center; font-family: sans-serif;",
+  );
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) document.body.removeChild(overlay);
+  });
+
+  const panel = document.createElement("div");
+  panel.setAttribute(
+    "style",
+    "background: #fff; color: #24292f; border-radius: 8px; padding: 20px; " +
+      "width: 520px; max-width: 90vw; max-height: 85vh; overflow-y: auto; " +
+      "box-shadow: 0 8px 24px rgba(0,0,0,0.4);",
+  );
+  panel.addEventListener("click", (event) => event.stopPropagation());
+
+  const title = document.createElement("h2");
+  title.textContent = "Configure Grafana jump";
+  title.setAttribute("style", "margin: 0 0 12px; font-size: 16px;");
+  panel.appendChild(title);
+
+  const help = document.createElement("p");
+  help.textContent =
+    "Set your Grafana base URL and the dashboards to jump to. For each dashboard, " +
+    "fill in whichever template-variable names it uses (dashboard settings -> " +
+    "Variables) - leave the rest blank. A dashboard only shows up as a jump target " +
+    "on pages matching a variable name you've filled in.";
+  help.setAttribute("style", "margin: 0 0 16px; font-size: 12px; color: #57606a;");
+  panel.appendChild(help);
+
+  const baseUrlLabel = document.createElement("label");
+  baseUrlLabel.textContent = "Grafana base URL";
+  baseUrlLabel.setAttribute("style", "display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px;");
+  panel.appendChild(baseUrlLabel);
+
+  const baseUrlInput = document.createElement("input");
+  baseUrlInput.type = "text";
+  baseUrlInput.placeholder = "https://grafana.example.com";
+  baseUrlInput.value = draft.baseUrl;
+  baseUrlInput.setAttribute(
+    "style",
+    "display: block; width: 100%; box-sizing: border-box; padding: 6px 8px; " +
+      "margin-bottom: 16px; font-size: 13px; border: 1px solid #d0d7de; border-radius: 6px;",
+  );
+  baseUrlInput.addEventListener("input", () => {
+    draft.baseUrl = baseUrlInput.value.trim();
+  });
+  panel.appendChild(baseUrlInput);
+
+  const dashboardsHeading = document.createElement("div");
+  dashboardsHeading.textContent = "Dashboards";
+  dashboardsHeading.setAttribute("style", "font-size: 12px; font-weight: 600; margin-bottom: 8px;");
+  panel.appendChild(dashboardsHeading);
+
+  const rowsContainer = document.createElement("div");
+  panel.appendChild(rowsContainer);
+
+  const textField = (
+    parent: HTMLElement,
+    labelText: string,
+    value: string,
+    onInput: (value: string) => void,
+  ): void => {
+    const wrapper = document.createElement("div");
+    wrapper.setAttribute("style", "margin-bottom: 6px;");
+    const label = document.createElement("label");
+    label.textContent = labelText;
+    label.setAttribute("style", "display: block; font-size: 11px; color: #57606a; margin-bottom: 2px;");
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = value;
+    input.setAttribute(
+      "style",
+      "display: block; width: 100%; box-sizing: border-box; padding: 4px 6px; " +
+        "font-size: 12px; border: 1px solid #d0d7de; border-radius: 4px;",
+    );
+    input.addEventListener("input", () => onInput(input.value));
+    wrapper.appendChild(label);
+    wrapper.appendChild(input);
+    parent.appendChild(wrapper);
+  };
+
+  const renderRows = (): void => {
+    rowsContainer.innerHTML = "";
+    draft.dashboards.forEach((dashboard, index) => {
+      const row = document.createElement("div");
+      row.setAttribute(
+        "style",
+        "border: 1px solid #d0d7de; border-radius: 6px; padding: 10px; margin-bottom: 10px; position: relative;",
+      );
+
+      const removeButton = document.createElement("button");
+      removeButton.type = "button";
+      removeButton.textContent = "Remove";
+      removeButton.setAttribute(
+        "style",
+        "position: absolute; top: 8px; right: 8px; background: none; border: none; " +
+          "color: #cf222e; font-size: 11px; cursor: pointer;",
+      );
+      removeButton.addEventListener("click", () => {
+        draft.dashboards.splice(index, 1);
+        renderRows();
+      });
+      row.appendChild(removeButton);
+
+      textField(row, "Display name", dashboard.name, (value) => {
+        dashboard.name = value;
+      });
+      textField(row, "Dashboard UID", dashboard.uid, (value) => {
+        dashboard.uid = value.trim();
+      });
+      textField(row, "Dashboard slug", dashboard.slug, (value) => {
+        dashboard.slug = value.trim();
+      });
+
+      const varsHeading = document.createElement("div");
+      varsHeading.textContent = "Template variable names (leave blank if not used)";
+      varsHeading.setAttribute("style", "font-size: 11px; color: #57606a; margin: 8px 0 4px;");
+      row.appendChild(varsHeading);
+
+      const varFields: Array<[keyof DashboardVarNames, string]> = [
+        ["branch", "Branch"],
+        ["prNumber", "PR number"],
+        ["workflowName", "Workflow file"],
+        ["runnerName", "Runner"],
+      ];
+      for (const [key, label] of varFields) {
+        textField(row, label, dashboard.varNames[key] ?? "", (value) => {
+          const trimmed = value.trim();
+          if (trimmed === "") {
+            delete dashboard.varNames[key];
+          } else {
+            dashboard.varNames[key] = trimmed;
+          }
+        });
+      }
+
+      rowsContainer.appendChild(row);
+    });
+  };
+  renderRows();
+
+  const addButton = document.createElement("button");
+  addButton.type = "button";
+  addButton.textContent = "+ Add dashboard";
+  addButton.setAttribute(
+    "style",
+    "display: block; width: 100%; padding: 8px; margin-bottom: 16px; " +
+      "background: #f6f8fa; border: 1px dashed #d0d7de; border-radius: 6px; " +
+      "font-size: 12px; cursor: pointer;",
+  );
+  addButton.addEventListener("click", () => {
+    draft.dashboards.push({ name: "", uid: "", slug: "", varNames: {} });
+    renderRows();
+  });
+  panel.appendChild(addButton);
+
+  const actions = document.createElement("div");
+  actions.setAttribute("style", "display: flex; justify-content: flex-end; gap: 8px;");
+
+  const cancelButton = document.createElement("button");
+  cancelButton.type = "button";
+  cancelButton.textContent = "Cancel";
+  cancelButton.setAttribute(
+    "style",
+    "padding: 6px 14px; font-size: 12px; border-radius: 6px; border: 1px solid #d0d7de; " +
+      "background: #fff; cursor: pointer;",
+  );
+  cancelButton.addEventListener("click", () => document.body.removeChild(overlay));
+  actions.appendChild(cancelButton);
+
+  const saveButton = document.createElement("button");
+  saveButton.type = "button";
+  saveButton.textContent = "Save";
+  saveButton.setAttribute(
+    "style",
+    "padding: 6px 14px; font-size: 12px; border-radius: 6px; border: none; " +
+      "background: #1f883d; color: #fff; cursor: pointer;",
+  );
+  saveButton.addEventListener("click", () => {
+    void (async () => {
+      const cleaned = normalizeConfig(draft);
+      await saveConfig(cleaned);
+      currentConfig = cleaned;
+      document.body.removeChild(overlay);
+      checkLocation(true);
+    })();
+  });
+  actions.appendChild(saveButton);
+
+  panel.appendChild(actions);
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+}
 
 function renderJumpButton(context: JumpContext | null): void {
-  const existing = document.getElementById(BUTTON_ID) as HTMLAnchorElement | null;
+  const existing = document.getElementById(CONTAINER_ID);
 
   if (!context) {
     existing?.remove();
     return;
   }
 
-  const href = buildGrafanaJumpUrl(context);
-  const label = labelForContext(context);
+  const applicable = applicableDashboards(currentConfig, context);
 
-  const anchorEl = existing ?? document.createElement("a");
-  anchorEl.setAttribute("id", BUTTON_ID);
-  anchorEl.setAttribute("href", href);
-  anchorEl.setAttribute("target", "_blank");
-  anchorEl.setAttribute(
+  const container = existing ?? document.createElement("div");
+  container.id = CONTAINER_ID;
+  container.setAttribute(
     "style",
-    "position: fixed; bottom: 16px; right: 16px; z-index: 2147483647; " +
-      "background: #F55F0E; color: #fff; padding: 8px 12px; border-radius: 6px; " +
-      "font-size: 12px; font-weight: 600; text-decoration: none; " +
-      "box-shadow: 0 1px 4px rgba(0,0,0,0.3);",
+    "position: fixed; bottom: 16px; right: 16px; z-index: 2147483647;",
   );
-  anchorEl.textContent = label;
+  container.innerHTML = "";
+
+  if (applicable.length === 0) {
+    const setupButton = document.createElement("button");
+    setupButton.type = "button";
+    setupButton.textContent = isConfigured(currentConfig)
+      ? "⚙️ No dashboard configured for this page"
+      : "⚙️ Set up Grafana jump";
+    setupButton.setAttribute("style", SOLO_BUTTON_STYLE);
+    setupButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openConfigModal();
+    });
+    container.appendChild(setupButton);
+  } else {
+    const [primary, ...rest] = applicable;
+    const label = labelForContext(context);
+
+    const jumpLink = document.createElement("a");
+    jumpLink.setAttribute("href", buildJumpUrl(currentConfig.baseUrl, primary, context));
+    jumpLink.setAttribute("target", "_blank");
+    jumpLink.setAttribute("style", BUTTON_STYLE);
+    jumpLink.textContent = applicable.length > 1 ? `${label} (${primary.name}) ↗️` : `${label} ↗️`;
+    container.appendChild(jumpLink);
+
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.textContent = "▾";
+    toggle.setAttribute("style", TOGGLE_STYLE);
+    toggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const items = [
+        ...applicable.map((dashboard) => ({
+          label: `↗️ ${dashboard.name || dashboard.uid}`,
+          onClick: () => window.open(buildJumpUrl(currentConfig.baseUrl, dashboard, context), "_blank"),
+        })),
+        { label: "⚙️ Edit dashboards...", onClick: openConfigModal },
+      ];
+      openMenu(container, items);
+    });
+    container.appendChild(toggle);
+
+    // rest is intentionally unused beyond being included in `applicable` above;
+    // named for clarity when reading the destructure at a glance.
+    void rest;
+  }
 
   if (!existing) {
-    document.body.appendChild(anchorEl);
+    document.body.appendChild(container);
   }
 }
 
 let lastLocationKey: string | undefined;
 
-function checkLocation(): void {
+function checkLocation(force = false): void {
   const { pathname, search } = window.location;
   const locationKey = `${pathname}${search}`;
-  if (locationKey === lastLocationKey) return;
+  if (!force && locationKey === lastLocationKey) return;
   lastLocationKey = locationKey;
 
   renderJumpButton(resolveJumpContext(pathname, search));
 }
 
 // Guarded so that requiring the compiled output under Node (see the test-only
-// export hook below) never touches DOM/browser globals - `document` always
+// export hook below) never touches DOM/GM/browser globals - `document` always
 // exists in the real userscript context, so this runs unconditionally there.
 if (typeof document !== "undefined") {
-  const routeChangeObserver = new MutationObserver(checkLocation);
-  routeChangeObserver.observe(document.body, { childList: true, subtree: true });
-  checkLocation();
+  void (async () => {
+    currentConfig = await loadConfig();
+
+    const routeChangeObserver = new MutationObserver(() => checkLocation());
+    routeChangeObserver.observe(document.body, { childList: true, subtree: true });
+    checkLocation();
+  })();
 }
 
 // ---------------------------------------------------------------------------
@@ -319,9 +737,14 @@ if (typeof module !== "undefined" && module.exports) {
     parseWorkflowContext,
     resolveJumpContext,
     extractBranchFromQuery,
+    contextVarKey,
+    contextFilterValue,
+    applicableDashboards,
     buildDashboardUrl,
-    buildGrafanaJumpUrl,
+    buildJumpUrl,
     labelForContext,
-    GRAFANA_CONFIG,
+    defaultConfig,
+    normalizeConfig,
+    isConfigured,
   };
 }
