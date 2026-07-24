@@ -8,10 +8,15 @@
     // "strict" implies "alwaysStrict") prepends a `"use strict";` line to
     // the compiled output. That line would sit above the
     // `// ==UserScript==` header block that Greasy Fork/userscript managers
-    // scan for, which is meant to be the first thing in the file. Disable
-    // just this sub-flag so the compiled dist/script.user.js starts with
-    // the header, matching the original hand-written source.
-    "alwaysStrict": false,
+    // scan for, which is meant to be the first thing in the file.
+    //
+    // We used to disable this via `"alwaysStrict": false`, but that value
+    // is being deprecated/removed upstream, so instead we let tsc emit the
+    // line as normal and strip it in this package's own `build` script
+    // (see package.json) when copying dist/index.js to dist/script.user.js
+    // — that's resilient regardless of whether a future TypeScript keeps
+    // an escape hatch for this at all.
+    //
     // dist/script.user.js is the only build artifact committed and served
     // (via a stable raw.githubusercontent.com URL) to Greasy Fork; the
     // sibling index.js.map is not shipped alongside it. Skip emitting a
