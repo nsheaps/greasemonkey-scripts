@@ -18,11 +18,17 @@ name: Regenerate Compiled Userscript
 #      deterministic, so even a manual workflow_dispatch re-run right
 #      after a bot commit is a no-op.
 #
-# main is protected by an active `require-pr` ruleset with no bypass actors,
-# so a plain `git push` straight to main always fails here. This follows the
-# same "try direct push, fall back to PR" idiom as nsheaps/github-actions'
-# sync-main-to-edge reusable workflow: attempt the push, and only if branch
-# protection rejects it, push to a branch and open a PR via that repo's
+# main is protected by an active `require-pr` ruleset, but this repo's
+# settings.yml grants the automation GitHub App an always-exemption
+# (bypass_mode: always) on that ruleset — same as repo admins — so
+# authenticating as that app via checkout-as-app (the same action
+# apply-repo-settings.yaml uses) should let this push straight to main.
+# The branch+PR fallback below is kept as defense-in-depth: the live
+# ruleset hasn't been confirmed to actually reflect that settings.yml
+# exemption yet (see task #45's bypass_actors sync-gap investigation),
+# so if the push is still rejected, this falls back to the same
+# "try direct push, fall back to PR" idiom as nsheaps/github-actions'
+# sync-main-to-edge reusable workflow, opening a PR via that repo's
 # open-pr-if-needed composite action (idempotent — reuses an already-open PR
 # instead of piling up duplicates).
 
@@ -54,8 +60,11 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Checkout as automation bot
+        uses: nsheaps/github-actions/.github/actions/checkout-as-app@main
+        with:
+          app-id: ${{ secrets.AUTOMATION_GITHUB_APP_ID }}
+          private-key: ${{ secrets.AUTOMATION_GITHUB_APP_PRIVATE_KEY }}
 
       - name: Set up Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -74,8 +83,6 @@ jobs:
       - name: Stage regenerated dist output if it changed
         id: stage
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -f packages/graphite-to-github-button/dist/script.user.js
           if git diff --cached --quiet; then
             echo "dist/script.user.js already up to date; nothing to commit."
