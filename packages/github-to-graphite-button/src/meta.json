@@ -1,0 +1,12 @@
+{
+  "name": "Github => Graphite button",
+  "description": "Add a button to go from app.graphite.dev to github.com",
+  "namespace": "https://www.github.com",
+  "match": ["http*://www.github.com/*", "http*://github.com/*"],
+  "run-at": "document-start",
+  "icon": "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==",
+  "grant": "none",
+  "license": "MIT",
+  "downloadURL": "https://github.com/nsheaps/greasemonkey-scripts/releases/latest/download/github-to-graphite-button.user.js",
+  "updateURL": "https://github.com/nsheaps/greasemonkey-scripts/releases/latest/download/github-to-graphite-button.user.js"
+}

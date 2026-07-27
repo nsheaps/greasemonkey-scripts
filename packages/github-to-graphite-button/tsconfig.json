@@ -3,13 +3,10 @@
   "compilerOptions": {
     "outDir": "./dist",
     "rootDir": "./src",
-    // Same reasoning as graphite-to-github-button's tsconfig.json: this
-    // package's src/index.ts has no import/export statements, so tsc's
-    // "use strict" prologue would sit above the `// ==UserScript==` header
-    // block. The package's own build script strips that prologue when
-    // copying dist/index.js to dist/script.user.js, and dist/script.user.js
-    // is the only artifact published, so skip emitting a sourceMap that
-    // would otherwise point at a file end users never get.
+    // Same reasoning as graphite-to-github-button's tsconfig.json:
+    // dist/script.user.js is the only published artifact, so skip emitting a
+    // sourceMap that would otherwise leave a `//# sourceMappingURL=...`
+    // comment pointing at a file end users never get.
     "sourceMap": false
   },
   "include": ["src/**/*"],
