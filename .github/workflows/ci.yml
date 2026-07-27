@@ -1,5 +1,21 @@
 name: CI
 
+# Correctness gate for every push and PR: every package must actually build
+# (tsc --build + each package's own postbuild step). Regenerating dist here
+# isn't just "best effort" - a build/typecheck failure fails this required
+# check. Actually publishing the resulting dist/*.user.js (repo commit +
+# versioned release asset) is a separate concern handled by release.yaml on
+# pushes to main.
+#
+# NOTE: package-level `test` scripts aren't run here yet - packages/template
+# ships a placeholder `test` script that always fails (`exit 1`, meant to be
+# replaced when the template is copied for a new script), so a blanket
+# `nx run-many --target=test --all` would fail this gate on that scaffold
+# package alone. github-actions-grafana-jump has real, passing tests
+# (`node --test test/*.test.js`, run as part of its own `build`+`test`
+# scripts); wiring a repo-wide test gate that skips scaffold packages is a
+# reasonable follow-up, not done here to keep this change scoped.
+
 on:
   push:
   pull_request:
@@ -8,8 +24,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version-file: ".nvmrc"
       - name: Set up corepack
@@ -20,13 +36,3 @@ jobs:
         run: yarn install --immutable
       - name: Build
         run: yarn run build
-    #   - name: Create Release
-    #     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    #     run: |
-    #       git config --global user.name "GitHub Actions"
-    #       git config --global user.email "actions@github.com"
-    #       yarn changeset version
-    #       git add .
-    #       git commit -m "chore: version packages"
-    #       git push
-    #       yarn changeset publish

@@ -3,8 +3,9 @@
   "version": "0.3.1",
   "main": "dist/index.js",
   "private": true,
+  "greasyforkPublish": true,
   "scripts": {
-    "build": "tsc --build",
+    "build": "tsc --build && node -e \"const fs=require('fs');const c=fs.readFileSync('dist/index.js','utf8').replace(/^[\\\"']use strict[\\\"'];?\\r?\\n/,'');fs.writeFileSync('dist/script.user.js',c)\"",
     "lint": "oxlint"
   },
   "devDependencies": {

@@ -1,5 +1,6 @@
 {
   "name": "greasemonkey-scripts",
+  "version": "0.1.0",
   "private": true,
   "workspaces": [
     "packages/*"
@@ -8,15 +9,19 @@
     "build": "nx run-many --target=build --all",
     "lint": "nx run-many --target=lint --all",
     "test": "nx run-many --target=test --all",
-    "changeset": "changeset",
-    "version-packages": "changeset version",
-    "release": "changeset publish"
+    "release": "release-it",
+    "release:ci": "release-it --ci",
+    "release:dry-run": "release-it --dry-run"
   },
   "devDependencies": {
-    "@changesets/cli": "~2.31.0",
+    "@release-it/conventional-changelog": "^11.0.1",
     "nx": "~23.0.1",
     "oxlint": "~1.71.0",
+    "release-it": "^20.2.1",
     "typescript": "~6.0.3"
+  },
+  "resolutions": {
+    "yoctocolors": "2.1.2"
   },
   "packageManager": "yarn@4.17.0+sha512.c2957de2f9025ab14d63b24d0d8be1f1655810e22c341042c27f7ecd017b180ec12db73d69ac366d71b304ef9f069349ce462de96f04f8f1da317f4f762c95ae",
   "engines": {

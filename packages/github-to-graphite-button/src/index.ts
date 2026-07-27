@@ -9,8 +9,8 @@
 // @grant        none
 // @license      MIT
 // @namespace https://www.github.com
-// @downloadURL https://update.greasyfork.org/scripts/509840/Github%20%3D%3E%20Graphite%20button.user.js
-// @updateURL https://update.greasyfork.org/scripts/509840/Github%20%3D%3E%20Graphite%20button.meta.js
+// @downloadURL https://github.com/nsheaps/greasemonkey-scripts/releases/latest/download/github-to-graphite-button.user.js
+// @updateURL https://github.com/nsheaps/greasemonkey-scripts/releases/latest/download/github-to-graphite-button.user.js
 // ==/UserScript==
 
 const PATH_REGEX = /^\/([^\/]+)\/([^\/]+)\/pull\/([^\/]+).*$/;

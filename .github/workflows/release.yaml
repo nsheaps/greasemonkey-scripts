@@ -1,0 +1,144 @@
+name: Release
+
+# Runs on every push to main (plus manual dispatch). Three things happen in
+# sequence, in one job so there's no cross-job artifact hand-off or race:
+#
+#   1. Build every package and, if any package's compiled dist/*.user.js
+#      changed, commit it straight to main. This keeps the repo tree's
+#      dist/ output current for anyone browsing/cloning the repo directly,
+#      independent of whether a release happens this run. A rebuild that
+#      matches what's already committed is a no-op (no commit, no push).
+#
+#   2. Run release-it (single repo-wide version - see .release-it.json -
+#      matching the convention used across nsheaps repos: one CHANGELOG.md,
+#      one `vX.Y.Z` git tag, one GitHub Release per repo, driven by
+#      conventional commits). If there are no releasable commits (no `feat`/
+#      `fix`/breaking-change commits since the last tag - a `chore: ...`
+#      dist-regen commit from step 1 alone does not count), release-it
+#      no-ops and steps 3 is skipped for this run, same as documented for
+#      nsheaps/github2's equivalent pipeline.
+#
+#   3. If a new release WAS cut, upload each "public" package's already-built
+#      dist/*.user.js (from step 1 - no rebuild needed) as an asset on that
+#      release. This is the actual artifact GitHub's stable
+#      `.../releases/latest/download/<name>` URL redirects to (verified live
+#      against an existing nsheaps release before wiring this up - see PR
+#      description). A package opts in via `"greasyforkPublish": true` in
+#      its own package.json; internal-only packages (e.g.
+#      github-actions-grafana-jump, whose own header says it's intentionally
+#      not meant for public distribution) are skipped by simply not setting
+#      that field.
+#
+# main is protected by an active `require-pr` ruleset. This repo's
+# settings.yml grants the org automation GitHub App an always-exemption on
+# that ruleset (same as repo admins), so authenticating as that app via
+# checkout-as-app (the same action apply-repo-settings.yaml uses) should let
+# both the dist-regen commit and release-it's own commit/tag push straight to
+# main. Known open risk (task #45): the live ruleset hasn't been confirmed to
+# actually reflect that settings.yml-declared exemption yet, so a push here
+# could still be rejected until that gap is resolved - there is currently no
+# branch/PR fallback for that case (unlike the narrower single-package
+# workflow this supersedes), since a release run that can't land on main
+# isn't meaningfully retryable via a side branch. If pushes start failing,
+# check task #45 first.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout as automation bot
+        id: auth
+        uses: nsheaps/github-actions/.github/actions/checkout-as-app@main
+        with:
+          app-id: ${{ secrets.AUTOMATION_GITHUB_APP_ID }}
+          private-key: ${{ secrets.AUTOMATION_GITHUB_APP_PRIVATE_KEY }}
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: ".nvmrc"
+
+      - name: Set up corepack
+        run: corepack enable && corepack install
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Build all packages
+        run: yarn run build
+
+      - name: Stage regenerated userscripts if any changed
+        id: stage
+        run: |
+          mapfile -t USER_SCRIPTS < <(find packages -maxdepth 3 -type f -path "*/dist/*.user.js")
+          if [ "${#USER_SCRIPTS[@]}" -eq 0 ]; then
+            echo "No packages/*/dist/*.user.js build artifacts found; nothing to stage."
+            exit 0
+          fi
+          git add -f "${USER_SCRIPTS[@]}"
+          if git diff --cached --quiet; then
+            echo "Compiled userscripts already up to date; nothing to commit."
+            exit 0
+          fi
+          git commit -m "chore: regenerate compiled userscripts"
+          git push origin HEAD:main
+
+      - name: Determine pre-release tag
+        id: before
+        run: echo "tag=$(git describe --tags --abbrev=0 2>/dev/null || echo none)" >> "$GITHUB_OUTPUT"
+
+      - name: Run release-it
+        env:
+          GITHUB_TOKEN: ${{ steps.auth.outputs.token }}
+        run: yarn run release:ci
+
+      - name: Determine post-release tag
+        id: after
+        run: echo "tag=$(git describe --tags --abbrev=0 2>/dev/null || echo none)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload public packages' compiled userscripts to the new release
+        if: steps.before.outputs.tag != steps.after.outputs.tag
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.after.outputs.tag }}"
+          UPLOAD_DIR="$(mktemp -d)"
+
+          for pkg_dir in packages/*/; do
+            pkg_json="${pkg_dir}package.json"
+            [ -f "$pkg_json" ] || continue
+            is_public=$(node -pe "require('./${pkg_json}').greasyforkPublish === true" 2>/dev/null || echo false)
+            [ "$is_public" = "true" ] || continue
+
+            pkg_name=$(basename "$pkg_dir")
+            # Every opted-in package's own build script emits
+            # dist/script.user.js (see packages/*/tsconfig.json's comments on
+            # why); rename to <package-dir-name>.user.js on the way to the
+            # release so multiple packages' assets can coexist on the same
+            # release, and so the name matches the fixed
+            # `.../releases/latest/download/<name>.user.js` URL baked into
+            # each package's own @downloadURL/@updateURL.
+            src="${pkg_dir}dist/script.user.js"
+            if [ ! -f "$src" ]; then
+              echo "::error::greasyforkPublish is true for $pkg_name but $src was not found after build"
+              exit 1
+            fi
+
+            dest="${UPLOAD_DIR}/${pkg_name}.user.js"
+            cp "$src" "$dest"
+            echo "Uploading $dest on $TAG"
+            gh release upload "$TAG" "$dest" --repo "${{ github.repository }}" --clobber
+          done

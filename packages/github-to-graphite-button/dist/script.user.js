@@ -1,33 +1,34 @@
 // ==UserScript==
-// @name        Graphite => GitHub button
+// @name        Github => Graphite button
 // @description Add a button to go from app.graphite.dev to github.com
-// @match       https://app.graphite.dev/*
-// @version      0.3.3
+// @match       http*://www.github.com/*
+// @match       http*://github.com/*
+// @version      0.3.1
 // @run-at      document-start
 // @icon         data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==
 // @grant        none
 // @license      MIT
-// @namespace https://app.graphite.dev
-// @downloadURL https://github.com/nsheaps/greasemonkey-scripts/releases/latest/download/graphite-to-github-button.user.js
-// @updateURL https://github.com/nsheaps/greasemonkey-scripts/releases/latest/download/graphite-to-github-button.user.js
+// @namespace https://www.github.com
+// @downloadURL https://github.com/nsheaps/greasemonkey-scripts/releases/latest/download/github-to-graphite-button.user.js
+// @updateURL https://github.com/nsheaps/greasemonkey-scripts/releases/latest/download/github-to-graphite-button.user.js
 // ==/UserScript==
-const PATH_REGEX = /^\/github\/pr\/([^\/]+)\/([^\/]+)\/([^\/]+).*$/;
-const SELECTOR = '[class^="PullRequestTitleBar_container_"] > div:nth-child(1) > div:nth-child(2)';
+const PATH_REGEX = /^\/([^\/]+)\/([^\/]+)\/pull\/([^\/]+).*$/;
+const SELECTOR = '[class^="gh-header-actions"]';
 const addButton = (toolbar) => {
     const match = window.location.pathname.match(PATH_REGEX);
     if (!match)
         return;
     const [_, org, repo, pr] = match;
-    const gitHubLink = `https://github.com/${org}/${repo}/pull/${pr}`;
-    if (document.getElementById("gitHubLink") != null) {
+    const graphiteLink = `https://app.graphite.dev/github/pr/${org}/${repo}/${pr}/`;
+    if (document.getElementById("graphiteLink") != null) {
         return;
     }
     const anchorEl = document.createElement("a");
-    anchorEl.setAttribute("id", "gitHubLink");
-    anchorEl.setAttribute("href", gitHubLink);
+    anchorEl.setAttribute("id", "graphiteLink");
+    anchorEl.setAttribute("href", graphiteLink);
     anchorEl.setAttribute("target", "_blank");
-    anchorEl.setAttribute("style", "background: #f0f0f333; padding: 6px; border-radius: 4px; flex-shrink: 0;");
-    anchorEl.appendChild(document.createTextNode("GitHub ↗️"));
+    anchorEl.setAttribute("class", "Button--secondary Button--small Button");
+    anchorEl.appendChild(document.createTextNode("Graphite ↗️"));
     toolbar.appendChild(anchorEl);
 };
 const toolbarObserver = new MutationObserver((_, observer) => {
