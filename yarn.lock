@@ -80,21 +80,11 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@greasemonkey-scripts/_template@workspace:packages/_template":
-  version: 0.0.0-use.local
-  resolution: "@greasemonkey-scripts/_template@workspace:packages/_template"
-  dependencies:
-    "@types/greasemonkey": "npm:~4.0.7"
-    typescript: "npm:~6.0.3"
-  languageName: unknown
-  linkType: soft
-
 "@greasemonkey-scripts/template@workspace:packages/template":
   version: 0.0.0-use.local
   resolution: "@greasemonkey-scripts/template@workspace:packages/template"
   dependencies:
     "@types/greasemonkey": "npm:~4.0.7"
-    typescript: "npm:~6.0.3"
   languageName: unknown
   linkType: soft
 
@@ -363,7 +353,6 @@ __metadata:
   dependencies:
     "@types/greasemonkey": "npm:~4.0.7"
     "@types/node": "npm:~24.13.2"
-    typescript: "npm:~6.0.3"
   languageName: unknown
   linkType: soft
 
@@ -372,7 +361,6 @@ __metadata:
   resolution: "@nsheaps/gm-github-to-graphite-button@workspace:packages/github-to-graphite-button"
   dependencies:
     "@types/greasemonkey": "npm:~4.0.7"
-    typescript: "npm:~6.0.3"
   languageName: unknown
   linkType: soft
 
@@ -381,7 +369,6 @@ __metadata:
   resolution: "@nsheaps/gm-graphite-to-github-button@workspace:packages/graphite-to-github-button"
   dependencies:
     "@types/greasemonkey": "npm:~4.0.7"
-    typescript: "npm:~6.0.3"
   languageName: unknown
   linkType: soft
 
