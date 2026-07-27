@@ -9,9 +9,7 @@
     "build": "nx run-many --target=build --all",
     "lint": "nx run-many --target=lint --all",
     "test": "nx run-many --target=test --all",
-    "release": "release-it",
-    "release:ci": "release-it --ci",
-    "release:dry-run": "release-it --dry-run"
+    "bump": "scripts/auto-bump-packages.sh"
   },
   "devDependencies": {
     "@release-it/conventional-changelog": "^11.0.1",
