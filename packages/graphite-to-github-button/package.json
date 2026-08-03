@@ -2,12 +2,13 @@
   "name": "@nsheaps/gm-graphite-to-github-button",
   "version": "0.3.3",
   "main": "dist/index.js",
+  "greasyforkPublish": true,
   "scripts": {
-    "build": "tsc --build",
-    "lint": "oxlint"
+    "build": "tsc --build && node ../../scripts/build-userscript.mjs",
+    "lint": "oxlint",
+    "test": "echo \"no tests yet for this package\""
   },
   "devDependencies": {
-    "@types/greasemonkey": "~4.0.7",
-    "typescript": "~6.0.3"
+    "@types/greasemonkey": "~4.0.7"
   }
 }
