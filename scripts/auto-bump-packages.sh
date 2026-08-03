@@ -87,11 +87,11 @@ for pkg_dir in packages/*/; do
   fi
   head_version="$(node -pe "require('./$pjson').version")"
 
-  # If the working-tree version is already higher than the base, a human bumped
-  # it deliberately (e.g. a minor/major bump). Preserve it, do not re-bump.
-  # Checked before the "did anything else change" filter below so a
-  # version-only manual bump (no other file touched) is still caught - it
-  # would otherwise be skipped by that filter, which ignores package.json.
+  # If the version in package.json is already higher than the base version,
+  # someone bumped it by hand (for a minor or major release). Leave it alone.
+  # We check this before looking at which files changed, further down -
+  # otherwise a version bumped by hand with no other file changes would get
+  # missed, since that check ignores package.json.
   if [ "$head_version" != "$base_version" ]; then
     higher="$(printf '%s\n%s\n' "$head_version" "$base_version" | sort -V | tail -1)"
     if [ "$higher" = "$head_version" ]; then
@@ -107,11 +107,11 @@ for pkg_dir in packages/*/; do
     fi
   fi
 
-  # A package "changed" if any of its files other than package.json and
-  # CHANGELOG.md differ from the change base. Those two are excluded so a
-  # previous version-bump commit alone does not re-trigger another bump.
-  # Only reached once the already-bumped case above has been ruled out, so
-  # a version-only manual bump is never silently dropped by this filter.
+  # A package counts as "changed" if any of its files, other than
+  # package.json and CHANGELOG.md, differ from the change base. We skip
+  # those two files so that a previous version-bump commit doesn't trigger
+  # another bump on its own. We only get here after already checking above
+  # for a hand-bumped version, so this check never hides one of those.
   if ! git diff --name-only "$CHANGE_BASE..HEAD" -- "$pkg_dir" 2>/dev/null \
       | grep -vE '(^|/)(package\.json|CHANGELOG\.md)$' | grep -q .; then
     continue

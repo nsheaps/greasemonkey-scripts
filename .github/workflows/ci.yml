@@ -1,18 +1,17 @@
 name: CI
 
-# Correctness gate for every push and PR: every package must actually build
-# (tsc --build + each package's own postbuild step) and pass its own `test`
-# target. Regenerating dist here isn't just "best effort" - a build/typecheck
-# or test failure fails this required check. Actually publishing the
-# resulting dist/*.user.js (repo commit + versioned release asset) is a
-# separate concern handled by release.yaml on pushes to main.
+# This is the required check on every push and PR: it builds every package
+# and runs each package's tests. If either fails, the check fails.
 #
-# Every package defines a `test` script so `nx run-many --target=test --all`
-# has something to run for all of them. Scaffold/template packages and the
-# two userscripts that don't have real coverage yet get a no-op passing
-# `test` (replace it with real tests as coverage is added); the placeholder
-# no longer fails the gate. github-actions-grafana-jump has real tests
+# Not every package has real tests yet. The ones that don't just print a
+# message and exit successfully for now - that way every package has a
+# test script to run, and we can fill in real tests over time without
+# changing this workflow. github-actions-grafana-jump does have real tests
 # (`node --test test/*.test.js`).
+#
+# Building and testing is all this workflow does. Publishing the built
+# files as a GitHub Release happens separately, in release.yaml, when
+# code lands on main.
 
 on:
   push:

@@ -94,11 +94,10 @@ jobs:
     steps:
       - name: Checkout as automation bot
         id: auth
-        # Untagged action - pinned to nsheaps/github-actions' main tip as of
-        # writing rather than a released version, since none exists. Every
-        # other action in this workflow is SHA-pinned; this one grants a
-        # privileged GitHub App token (contents: write on this repo), so a
-        # floating @main ref here is the one step that most needs pinning.
+        # This action doesn't publish version tags, so we pin it to a
+        # specific commit instead of the main branch - same as every other
+        # action in this workflow. It matters most here, since this step
+        # creates a GitHub App token with write access to this repo.
         uses: nsheaps/github-actions/.github/actions/checkout-as-app@c1794f6f4fbb3cbc5e5a71e820581a74239f706a
         with:
           app-id: ${{ secrets.AUTOMATION_GITHUB_APP_ID }}
