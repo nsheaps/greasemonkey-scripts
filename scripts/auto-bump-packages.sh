@@ -79,14 +79,6 @@ for pkg_dir in packages/*/; do
   opted_in="$(node -pe "require('./$pjson').greasyforkPublish === true" 2>/dev/null || echo false)"
   [ "$opted_in" = "true" ] || continue
 
-  # A package "changed" if any of its files other than package.json and
-  # CHANGELOG.md differ from the change base. Those two are excluded so a
-  # previous version-bump commit alone does not re-trigger another bump.
-  if ! git diff --name-only "$CHANGE_BASE..HEAD" -- "$pkg_dir" 2>/dev/null \
-      | grep -vE '(^|/)(package\.json|CHANGELOG\.md)$' | grep -q .; then
-    continue
-  fi
-
   base_version="$(git show "$VERSION_BASE:$pjson" 2>/dev/null \
     | node -pe "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo '0.0.0')"
   # A package added since the base ref has no version there; treat it as 0.0.0.
@@ -97,6 +89,9 @@ for pkg_dir in packages/*/; do
 
   # If the working-tree version is already higher than the base, a human bumped
   # it deliberately (e.g. a minor/major bump). Preserve it, do not re-bump.
+  # Checked before the "did anything else change" filter below so a
+  # version-only manual bump (no other file touched) is still caught - it
+  # would otherwise be skipped by that filter, which ignores package.json.
   if [ "$head_version" != "$base_version" ]; then
     higher="$(printf '%s\n%s\n' "$head_version" "$base_version" | sort -V | tail -1)"
     if [ "$higher" = "$head_version" ]; then
@@ -110,6 +105,16 @@ for pkg_dir in packages/*/; do
         '{name:$n,path:$p,base:$b,new:$w,action:$a}')")
       continue
     fi
+  fi
+
+  # A package "changed" if any of its files other than package.json and
+  # CHANGELOG.md differ from the change base. Those two are excluded so a
+  # previous version-bump commit alone does not re-trigger another bump.
+  # Only reached once the already-bumped case above has been ruled out, so
+  # a version-only manual bump is never silently dropped by this filter.
+  if ! git diff --name-only "$CHANGE_BASE..HEAD" -- "$pkg_dir" 2>/dev/null \
+      | grep -vE '(^|/)(package\.json|CHANGELOG\.md)$' | grep -q .; then
+    continue
   fi
 
   if [ "$PREVIEW" = true ]; then
