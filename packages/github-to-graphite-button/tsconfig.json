@@ -2,7 +2,12 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "./dist",
-    "rootDir": "./src"
+    "rootDir": "./src",
+    // Same reasoning as graphite-to-github-button's tsconfig.json:
+    // dist/script.user.js is the only published artifact, so skip emitting a
+    // sourceMap that would otherwise leave a `//# sourceMappingURL=...`
+    // comment pointing at a file end users never get.
+    "sourceMap": false
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]

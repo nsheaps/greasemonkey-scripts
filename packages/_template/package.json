@@ -4,10 +4,10 @@
   "private": true,
   "scripts": {
     "build": "tsc --build",
-    "lint": "oxlint"
+    "lint": "oxlint",
+    "test": "echo \"no tests yet - add real tests when copying this template\""
   },
   "devDependencies": {
-    "@types/greasemonkey": "~4.0.7",
-    "typescript": "~6.0.3"
+    "@types/greasemonkey": "~4.0.7"
   }
 }

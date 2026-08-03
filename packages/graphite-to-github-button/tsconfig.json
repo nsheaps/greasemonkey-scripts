@@ -2,7 +2,15 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "./dist",
-    "rootDir": "./src"
+    "rootDir": "./src",
+    // dist/script.user.js (dist/index.js with the generated
+    // `// ==UserScript==` header prepended - see
+    // scripts/build-userscript.mjs) is the only artifact published as a
+    // release asset; the sibling index.js.map is not shipped alongside it.
+    // Skip emitting a sourceMap so the compiled output doesn't end with a
+    // `//# sourceMappingURL=...` comment pointing at a file end users won't
+    // have.
+    "sourceMap": false
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]

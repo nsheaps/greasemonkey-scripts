@@ -1,17 +1,6 @@
-// ==UserScript==
-// @name        Github => Graphite button
-// @description Add a button to go from app.graphite.dev to github.com
-// @match       http*://www.github.com/*
-// @match       http*://github.com/*
-// @version      0.3.1
-// @run-at      document-start
-// @icon         data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==
-// @grant        none
-// @license      MIT
-// @namespace https://www.github.com
-// @downloadURL https://update.greasyfork.org/scripts/509840/Github%20%3D%3E%20Graphite%20button.user.js
-// @updateURL https://update.greasyfork.org/scripts/509840/Github%20%3D%3E%20Graphite%20button.meta.js
-// ==/UserScript==
+// The `// ==UserScript==` metadata block for this script lives in
+// src/meta.json and is prepended to the compiled output by
+// scripts/build-userscript.mjs. See that script for why it isn't inlined here.
 
 const PATH_REGEX = /^\/([^\/]+)\/([^\/]+)\/pull\/([^\/]+).*$/;
 const SELECTOR = '[class^="gh-header-actions"]';

@@ -1,0 +1,247 @@
+name: Release
+
+# Per-package release pipeline. Each publishable package (opted in via
+# `"greasyforkPublish": true` in its own package.json) owns its version in its
+# own package.json and its own CHANGELOG.md; internal-only packages (e.g.
+# github-actions-grafana-jump) are simply not opted in and never touched here.
+#
+# On a pull request: PREVIEW ONLY. Computes the patch bump each changed package
+# would receive on merge and posts it as a sticky comment. Nothing is committed
+# to the PR branch - bumping inside PR branches produces constant cross-PR
+# conflicts on the same version lines.
+#
+# On push to main: the SOLE place bumps are committed. One job runs
+# release-it per changed package, makes ONE commit, and does ONE atomic push of
+# that commit plus the release tags. Doing the bump, the lint and the tag move
+# in a single push is what stops a bump from triggering a follow-up
+# lint/format commit that would trigger another bump.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      from_sha:
+        description: "commit sha from...HEAD to bump against (overrides the release/last-run tag)"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: ${{ github.ref == 'refs/heads/main' && 'release-main' || format('release-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  version-preview:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Fetch base branch
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git fetch origin "$BASE_REF":refs/remotes/origin/"$BASE_REF"
+
+      - uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4.2.3
+        with:
+          install: true
+          cache: true
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Compute version bump preview
+        id: bump
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          # Diff against the PR base branch so only THIS PR's changes count.
+          # Using release/last-run here would be wrong: if main has advanced
+          # past that tag, the diff would sweep in other merged PRs' changes.
+          OUTPUT=$(./scripts/auto-bump-packages.sh \
+            "--change-base=origin/$BASE_REF" "--version-base=$BASE_REF" --preview)
+          {
+            echo "report-md<<REPORT_MD_EOF"
+            echo "$OUTPUT" | jq -r '.report_md'
+            echo "REPORT_MD_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post version preview comment
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          header: package-versions
+          message: |
+            ### Userscript Version Preview
+
+            _Preview only — versions and CHANGELOGs are bumped automatically on merge to `main`, **not** in this PR. Manual bumps to a higher version are preserved._
+
+            ${{ steps.bump.outputs.report-md }}
+
+  release:
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout as automation bot
+        id: auth
+        # This action doesn't publish version tags, so we pin it to a
+        # specific commit instead of the main branch - same as every other
+        # action in this workflow. It matters most here, since this step
+        # creates a GitHub App token with write access to this repo.
+        uses: nsheaps/github-actions/.github/actions/checkout-as-app@c1794f6f4fbb3cbc5e5a71e820581a74239f706a
+        with:
+          app-id: ${{ secrets.AUTOMATION_GITHUB_APP_ID }}
+          private-key: ${{ secrets.AUTOMATION_GITHUB_APP_PRIVATE_KEY }}
+          fetch-depth: 0
+
+      - name: Resolve base ref
+        id: resolve-base
+        env:
+          FROM_SHA: ${{ inputs.from_sha }}
+        run: |
+          # release/last-run is a moving marker pointing at the commit released
+          # by the previous successful run. Package change detection diffs
+          # against it, which is what makes "did this package change since we
+          # last released it" answerable when several packages are versioned
+          # independently and no single repo-wide version exists.
+          TAG_NAME="release/last-run"
+          if [ -n "$FROM_SHA" ]; then
+            echo "base-ref=$FROM_SHA" >> "$GITHUB_OUTPUT"
+          elif git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "base-ref=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "base-ref=HEAD~1" >> "$GITHUB_OUTPUT"
+            echo "'$TAG_NAME' not found (first run), falling back to HEAD~1"
+          fi
+
+      - uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4.2.3
+        with:
+          install: true
+          cache: true
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Bump changed packages
+        id: bump
+        env:
+          BASE_REF: ${{ steps.resolve-base.outputs.base-ref }}
+        run: |
+          OUTPUT=$(./scripts/auto-bump-packages.sh \
+            "--change-base=$BASE_REF" "--version-base=$BASE_REF")
+          echo "has-bumps=$(echo "$OUTPUT" | jq -r '.has_bumps')" >> "$GITHUB_OUTPUT"
+          echo "bumps=$(echo "$OUTPUT" | jq -c '.bumps')" >> "$GITHUB_OUTPUT"
+          {
+            echo "report-md<<REPORT_MD_EOF"
+            echo "$OUTPUT" | jq -r '.report_md'
+            echo "REPORT_MD_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Lint after bump
+        if: steps.bump.outputs.has-bumps == 'true'
+        run: yarn run lint
+
+      - name: Commit bumps and tag
+        id: commit
+        if: steps.bump.outputs.has-bumps == 'true'
+        env:
+          GIT_AUTHOR_NAME: ${{ steps.auth.outputs.user-name }}
+          GIT_AUTHOR_EMAIL: ${{ steps.auth.outputs.user-email }}
+          GIT_COMMITTER_NAME: ${{ steps.auth.outputs.user-name }}
+          GIT_COMMITTER_EMAIL: ${{ steps.auth.outputs.user-email }}
+        run: |
+          set -euo pipefail
+          git add packages/*/package.json packages/*/CHANGELOG.md
+          # A run consisting only of already-bumped packages has nothing to
+          # stage - the human's bump is already committed - but still needs a
+          # release cut below, so an empty diff here is not an error.
+          if git diff --cached --quiet; then
+            echo "No version/changelog changes to commit (all packages were already bumped)"
+          else
+            # [skip ci] keeps this bump commit from re-triggering this workflow.
+            git commit -m "chore(release): bump userscript versions [skip ci]"
+          fi
+
+          # One immutable tag per release run, carrying the GitHub Release the
+          # userscripts' @downloadURL/@updateURL resolve through.
+          #
+          # JUDGEMENT CALL: one shared release per run, not one per package.
+          # Every published script's @downloadURL points at the stable
+          # .../releases/latest/download/<name>.user.js path. Per-package tags
+          # would make "latest" ambiguous - whichever package released most
+          # recently would win, and the other scripts' download URLs would
+          # resolve to a release that has no asset for them. A single release
+          # per run carries every bumped package's asset, so "latest" always
+          # has all of them. Per-package provenance is not lost: each package
+          # keeps its own version in its package.json and its own CHANGELOG.md.
+          RELEASE_TAG="release/$(date -u +%Y%m%d-%H%M%S)"
+          git tag -a "$RELEASE_TAG" -m "Release $RELEASE_TAG"
+          git tag -f "release/last-run" HEAD
+          echo "release-tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build bumped packages
+        if: steps.bump.outputs.has-bumps == 'true'
+        run: yarn run build
+
+      - name: Push commit and tags
+        if: steps.bump.outputs.has-bumps == 'true'
+        run: |
+          # Single atomic push: the bump commit, the new release tag, and the
+          # moved marker land together or not at all, so a partial failure can
+          # never leave the marker ahead of the commit it describes.
+          git push --atomic origin HEAD \
+            "refs/tags/${{ steps.commit.outputs.release-tag }}" \
+            "+refs/tags/release/last-run"
+
+      - name: Create the GitHub Release
+        if: steps.bump.outputs.has-bumps == 'true'
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.token }}
+          RELEASE_TAG: ${{ steps.commit.outputs.release-tag }}
+          REPORT_MD: ${{ steps.bump.outputs.report-md }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$REPORT_MD" > /tmp/release-notes.md
+          gh release create "$RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
+            --title "$RELEASE_TAG" \
+            --notes-file /tmp/release-notes.md \
+            --latest
+
+      - name: Upload userscripts as release assets
+        if: steps.bump.outputs.has-bumps == 'true'
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.token }}
+          RELEASE_TAG: ${{ steps.commit.outputs.release-tag }}
+          BUMPS: ${{ steps.bump.outputs.bumps }}
+        run: |
+          set -euo pipefail
+          UPLOAD_DIR="$(mktemp -d)"
+
+          # Only packages that actually released this run. dist/ is built
+          # fresh above and never committed.
+          echo "$BUMPS" | jq -r '.[].name' | while read -r pkg_name; do
+            # Rename to <package-dir-name>.user.js so several packages' assets
+            # coexist on one release and each matches the fixed
+            # .../releases/latest/download/<name>.user.js URL baked into that
+            # package's own @downloadURL/@updateURL.
+            src="packages/${pkg_name}/dist/script.user.js"
+            if [ ! -f "$src" ]; then
+              echo "::error::greasyforkPublish is set for $pkg_name but $src is missing after build"
+              exit 1
+            fi
+            dest="${UPLOAD_DIR}/${pkg_name}.user.js"
+            cp "$src" "$dest"
+            echo "Uploading $dest to $RELEASE_TAG"
+            gh release upload "$RELEASE_TAG" "$dest" --repo "${{ github.repository }}" --clobber
+          done

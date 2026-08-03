@@ -1,16 +1,6 @@
-// ==UserScript==
-// @name        Graphite => GitHub button
-// @description Add a button to go from app.graphite.dev to github.com
-// @match       https://app.graphite.dev/*
-// @version      0.3.3
-// @run-at      document-start
-// @icon         data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==
-// @grant        none
-// @license      MIT
-// @namespace https://app.graphite.dev
-// @downloadURL https://update.greasyfork.org/scripts/509841/Graphite%20%3D%3E%20GitHub%20button.user.js
-// @updateURL https://update.greasyfork.org/scripts/509841/Graphite%20%3D%3E%20GitHub%20button.meta.js
-// ==/UserScript==
+// The `// ==UserScript==` metadata block for this script lives in
+// src/meta.json and is prepended to the compiled output by
+// scripts/build-userscript.mjs. See that script for why it isn't inlined here.
 
 const PATH_REGEX = /^\/github\/pr\/([^\/]+)\/([^\/]+)\/([^\/]+).*$/;
 const SELECTOR =

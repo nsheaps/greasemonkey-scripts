@@ -18,7 +18,9 @@
         "^build"
       ],
       "inputs": [
-        "{projectRoot}/src/**/*"
+        "{projectRoot}/src/**/*",
+        "{projectRoot}/package.json",
+        "{workspaceRoot}/scripts/build-userscript.mjs"
       ],
       "outputs": [
         "{projectRoot}/dist"
