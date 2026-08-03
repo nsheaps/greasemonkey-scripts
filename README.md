@@ -58,8 +58,11 @@ This repository uses a monorepo structure with the following setup:
 - Each release run publishes one GitHub Release carrying every bumped script's
   compiled `<package-name>.user.js` as an asset. Published scripts point their
   `@downloadURL`/`@updateURL` at that release's stable `latest/download` URL,
-  which is how [GreasyFork](https://greasyfork.org/en/scripts?by=1372068)
-  picks up new versions.
+  so a userscript manager installed directly from GitHub auto-updates from
+  there. [GreasyFork](https://greasyfork.org/en/scripts?by=1372068) forcibly
+  rewrites those same fields for any script actually listed on its site, so
+  the existing GreasyFork listings keep updating through GreasyFork's own
+  mechanism instead - this pipeline doesn't change that.
 - `yarn bump` runs the same bump logic locally; pass `--preview` to see what
   would happen without writing anything.
 
