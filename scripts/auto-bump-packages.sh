@@ -16,9 +16,12 @@
 # Both refs default to origin/main. On merge to main both are release/last-run;
 # on a PR use --change-base=origin/<base> --version-base=<base> --preview.
 #
-# Only packages opting in with `"greasyforkPublish": true` in their own
-# package.json are considered - internal-only packages (e.g.
-# github-actions-grafana-jump) are deliberately outside the release pipeline.
+# A manual version bump is detected for every package, published or not, so
+# it's always visible in the preview - e.g. bumping github-actions-grafana-jump
+# by hand still shows up, it just doesn't trigger a release. Only packages
+# opting in with `"greasyforkPublish": true` in their own package.json are
+# auto-bumped from file changes or have their asset uploaded on release;
+# internal-only packages are deliberately outside the rest of the pipeline.
 #
 # Requires: git, jq, node. In non-preview mode also requires release-it at the
 # repo root (node_modules/.bin/release-it), driven per package via that
@@ -66,6 +69,7 @@ next_patch() {
 }
 
 BUMP_ENTRIES=()
+HAS_ROWS=false
 REPORT_MD='| Package | Base | New | Action |\n|---|---|---|---|'
 HAS_BUMPS=false
 
@@ -75,9 +79,10 @@ for pkg_dir in packages/*/; do
   pjson="${pkg_dir}package.json"
   [ -f "$pjson" ] || continue
 
-  # Only packages that opt in to public release.
+  # Whether this package is in the release pipeline. Computed up front but
+  # not gated on yet - the manual-bump check just below applies to every
+  # package so a hand-bumped internal package still shows up in the preview.
   opted_in="$(node -pe "require('./$pjson').greasyforkPublish === true" 2>/dev/null || echo false)"
-  [ "$opted_in" = "true" ] || continue
 
   base_version="$(git show "$VERSION_BASE:$pjson" 2>/dev/null \
     | node -pe "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo '0.0.0')"
@@ -91,21 +96,38 @@ for pkg_dir in packages/*/; do
   # someone bumped it by hand (for a minor or major release). Leave it alone.
   # We check this before looking at which files changed, further down -
   # otherwise a version bumped by hand with no other file changes would get
-  # missed, since that check ignores package.json.
+  # missed, since that check ignores package.json. Checked for every package
+  # regardless of opted_in, so this is where a manually-bumped internal
+  # package gets reported.
   if [ "$head_version" != "$base_version" ]; then
     higher="$(printf '%s\n%s\n' "$head_version" "$base_version" | sort -V | tail -1)"
     if [ "$higher" = "$head_version" ]; then
       echo "kept: $name already bumped $base_version -> $head_version" >&2
-      # Still counts as releasable: the version moved since the base ref, so
-      # this package needs its asset published even though we didn't bump it.
-      HAS_BUMPS=true
-      REPORT_MD="$REPORT_MD\n| $name | $base_version | $head_version | already-bumped |"
-      BUMP_ENTRIES+=("$(jq -nc --arg n "$name" --arg p "$pjson" --arg b "$base_version" \
-        --arg w "$head_version" --arg a already-bumped \
-        '{name:$n,path:$p,base:$b,new:$w,action:$a}')")
+      if [ "$opted_in" = "true" ]; then
+        # Still counts as releasable: the version moved since the base ref,
+        # so this package needs its asset published even though we didn't
+        # bump it.
+        HAS_BUMPS=true
+        HAS_ROWS=true
+        REPORT_MD="$REPORT_MD\n| $name | $base_version | $head_version | already-bumped |"
+        BUMP_ENTRIES+=("$(jq -nc --arg n "$name" --arg p "$pjson" --arg b "$base_version" \
+          --arg w "$head_version" --arg a already-bumped \
+          '{name:$n,path:$p,base:$b,new:$w,action:$a}')")
+      else
+        # Not in the release pipeline, so it never goes into bumps/has_bumps -
+        # there's no .release-it.js or built script.user.js for the release
+        # job to publish. Reported for visibility only.
+        HAS_ROWS=true
+        REPORT_MD="$REPORT_MD\n| $name | $base_version | $head_version | manual (internal) |"
+      fi
       continue
     fi
   fi
+
+  # Everything below only applies to packages in the release pipeline - an
+  # internal-only package with no version bump (handled above) has nothing
+  # further to detect or report.
+  [ "$opted_in" = "true" ] || continue
 
   # A package counts as "changed" if any of its files, other than
   # package.json and CHANGELOG.md, differ from the change base. We skip
@@ -130,6 +152,7 @@ for pkg_dir in packages/*/; do
     action=auto-bumped
   fi
   HAS_BUMPS=true
+  HAS_ROWS=true
   REPORT_MD="$REPORT_MD\n| $name | $base_version | $new_version | $action |"
   BUMP_ENTRIES+=("$(jq -nc --arg n "$name" --arg p "$pjson" --arg b "$base_version" \
     --arg w "$new_version" --arg a "$action" \
@@ -140,6 +163,11 @@ if [ "${#BUMP_ENTRIES[@]}" -gt 0 ]; then
   bumps="$(printf '%s\n' "${BUMP_ENTRIES[@]}" | jq -sc '.')"
 else
   bumps='[]'
+fi
+
+# BUMP_ENTRIES alone would miss the manual-internal-bump rows added above,
+# which are reported but deliberately excluded from bumps/has_bumps.
+if [ "$HAS_ROWS" = false ]; then
   REPORT_MD="$REPORT_MD\n| _no package changes detected_ |  |  |  |"
 fi
 
