@@ -1,6 +1,6 @@
 {
   "name": "@nsheaps/gm-github-to-graphite-button",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "main": "dist/index.js",
   "private": true,
   "greasyforkPublish": true,
