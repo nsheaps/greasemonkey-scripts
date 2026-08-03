@@ -80,6 +80,14 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@greasemonkey-scripts/_template@workspace:packages/_template":
+  version: 0.0.0-use.local
+  resolution: "@greasemonkey-scripts/_template@workspace:packages/_template"
+  dependencies:
+    "@types/greasemonkey": "npm:~4.0.7"
+  languageName: unknown
+  linkType: soft
+
 "@greasemonkey-scripts/template@workspace:packages/template":
   version: 0.0.0-use.local
   resolution: "@greasemonkey-scripts/template@workspace:packages/template"

@@ -5,7 +5,8 @@
   "greasyforkPublish": true,
   "scripts": {
     "build": "tsc --build && node ../../scripts/build-userscript.mjs",
-    "lint": "oxlint"
+    "lint": "oxlint",
+    "test": "echo \"no tests yet for this package\""
   },
   "devDependencies": {
     "@types/greasemonkey": "~4.0.7"

@@ -1,20 +1,18 @@
 name: CI
 
 # Correctness gate for every push and PR: every package must actually build
-# (tsc --build + each package's own postbuild step). Regenerating dist here
-# isn't just "best effort" - a build/typecheck failure fails this required
-# check. Actually publishing the resulting dist/*.user.js (repo commit +
-# versioned release asset) is a separate concern handled by release.yaml on
-# pushes to main.
+# (tsc --build + each package's own postbuild step) and pass its own `test`
+# target. Regenerating dist here isn't just "best effort" - a build/typecheck
+# or test failure fails this required check. Actually publishing the
+# resulting dist/*.user.js (repo commit + versioned release asset) is a
+# separate concern handled by release.yaml on pushes to main.
 #
-# NOTE: package-level `test` scripts aren't run here yet - packages/template
-# ships a placeholder `test` script that always fails (`exit 1`, meant to be
-# replaced when the template is copied for a new script), so a blanket
-# `nx run-many --target=test --all` would fail this gate on that scaffold
-# package alone. github-actions-grafana-jump has real, passing tests
-# (`node --test test/*.test.js`, run as part of its own `build`+`test`
-# scripts); wiring a repo-wide test gate that skips scaffold packages is a
-# reasonable follow-up, not done here to keep this change scoped.
+# Every package defines a `test` script so `nx run-many --target=test --all`
+# has something to run for all of them. Scaffold/template packages and the
+# two userscripts that don't have real coverage yet get a no-op passing
+# `test` (replace it with real tests as coverage is added); the placeholder
+# no longer fails the gate. github-actions-grafana-jump has real tests
+# (`node --test test/*.test.js`).
 
 on:
   push:
@@ -36,3 +34,5 @@ jobs:
         run: yarn install --immutable
       - name: Build
         run: yarn run build
+      - name: Test
+        run: yarn run test

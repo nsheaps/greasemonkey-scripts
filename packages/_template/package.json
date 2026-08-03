@@ -1,9 +1,9 @@
 {
-  "name": "@greasemonkey-scripts/template",
+  "name": "@greasemonkey-scripts/_template",
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "build": "tsc",
+    "build": "tsc --build",
     "lint": "oxlint",
     "test": "echo \"no tests yet - add real tests when copying this template\""
   },
