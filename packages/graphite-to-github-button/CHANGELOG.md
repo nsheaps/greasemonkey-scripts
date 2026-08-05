@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.5](https://github.com/nsheaps/greasemonkey-scripts/compare/release/20260803-221753...0.3.5) (2026-08-05)
+
+### Bug Fixes
+
+* **graphite-to-github-button:** remove stray trailing whitespace ([#29](https://github.com/nsheaps/greasemonkey-scripts/issues/29)) ([699c340](https://github.com/nsheaps/greasemonkey-scripts/commit/699c34020ea9c6bf87a70b7140b8e726ea2f43bc))
+
 ## 0.3.4 (2026-08-03)
 
 ### Bug Fixes
