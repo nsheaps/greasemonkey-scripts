@@ -21,6 +21,7 @@ const addButton = (toolbar: HTMLElement) => {
   anchorEl.setAttribute("id", "gitHubLink");
   anchorEl.setAttribute("href", gitHubLink);
   anchorEl.setAttribute("target", "_blank");
+  anchorEl.setAttribute("rel", "noopener noreferrer");
   anchorEl.setAttribute(
     "style",
     "background: #f0f0f333; padding: 6px; border-radius: 4px; flex-shrink: 0;"

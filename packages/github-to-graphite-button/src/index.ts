@@ -20,6 +20,7 @@ const addButton = (toolbar: HTMLElement) => {
   anchorEl.setAttribute("id", "graphiteLink");
   anchorEl.setAttribute("href", graphiteLink);
   anchorEl.setAttribute("target", "_blank");
+  anchorEl.setAttribute("rel", "noopener noreferrer");
   anchorEl.setAttribute("class", "Button--secondary Button--small Button");
   anchorEl.appendChild(document.createTextNode("Graphite ↗️"));
 
