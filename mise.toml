@@ -5,7 +5,7 @@
 # cascade-breaks that show up as unrelated CI failures. Bump deliberately.
 [tools]
 # Must match .nvmrc and package.json's engines.node.
-node = "24.18.0"
+node = "24.18.1"
 # Must match package.json's `packageManager` field so the lockfile metadata
 # version is not migrated by a newer yarn. Renovate updates package.json but
 # not this pin, so the two have to be changed in lockstep.
