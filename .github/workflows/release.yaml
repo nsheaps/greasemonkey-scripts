@@ -180,10 +180,13 @@ jobs:
           # .../releases/latest/download/<name>.user.js path. Per-package tags
           # would make "latest" ambiguous - whichever package released most
           # recently would win, and the other scripts' download URLs would
-          # resolve to a release that has no asset for them. A single release
-          # per run carries every bumped package's asset, so "latest" always
-          # has all of them. Per-package provenance is not lost: each package
-          # keeps its own version in its package.json and its own CHANGELOG.md.
+          # resolve to a release that has no asset for them. That's also why
+          # the upload step below re-uploads every greasyforkPublish package's
+          # asset on every run, not just the ones bumped this run: "latest" is
+          # one shared pointer, so leaving an unchanged package out would make
+          # its download URL 404 the instant any other package's release moved
+          # past it. Per-package provenance is not lost: each package keeps
+          # its own version in its package.json and its own CHANGELOG.md.
           RELEASE_TAG="release/$(date -u +%Y%m%d-%H%M%S)"
           git tag -a "$RELEASE_TAG" -m "Release $RELEASE_TAG"
           git tag -f "release/last-run" HEAD
@@ -223,14 +226,25 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.auth.outputs.token }}
           RELEASE_TAG: ${{ steps.commit.outputs.release-tag }}
-          BUMPS: ${{ steps.bump.outputs.bumps }}
         run: |
           set -euo pipefail
           UPLOAD_DIR="$(mktemp -d)"
 
-          # Only packages that actually released this run. dist/ is built
-          # fresh above and never committed.
-          echo "$BUMPS" | jq -r '.[].name' | while read -r pkg_name; do
+          # Every greasyforkPublish package gets its asset re-uploaded on
+          # every release, not just the ones bumped this run. "latest" is one
+          # shared pointer across all published scripts' @downloadURL and
+          # GreasyFork sync identifiers - a script left out here would vanish
+          # from releases/latest/download/<name>.user.js the moment any OTHER
+          # script's release moves "latest" past it, even though its own code
+          # never changed. `yarn run build` above already built every
+          # package, bumped or not.
+          for pkg_dir in packages/*/; do
+            pkg_name="$(basename "$pkg_dir")"
+            pjson="${pkg_dir}package.json"
+            [ -f "$pjson" ] || continue
+            opted_in="$(node -pe "require('./$pjson').greasyforkPublish === true" 2>/dev/null || echo false)"
+            [ "$opted_in" = "true" ] || continue
+
             # Rename to <package-dir-name>.user.js so several packages' assets
             # coexist on one release and each matches the fixed
             # .../releases/latest/download/<name>.user.js URL baked into that
