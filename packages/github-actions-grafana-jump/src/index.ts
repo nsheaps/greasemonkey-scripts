@@ -1,16 +1,6 @@
-// ==UserScript==
-// @name        GitHub Actions => Grafana jump button
-// @description Add a button on github.com Actions pages (PR checks, branch-filtered runs, a single workflow's runs, and runner detail pages) that jumps to a matching Grafana drill-down dashboard you configure yourself
-// @match       http*://www.github.com/*
-// @match       http*://github.com/*
-// @version      0.2.0
-// @run-at      document-start
-// @icon         data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==
-// @grant        GM.setValue
-// @grant        GM.getValue
-// @license      MIT
-// @namespace https://www.github.com
-// ==/UserScript==
+// The `// ==UserScript==` metadata block for this script lives in
+// src/meta.json and is prepended to the compiled output by
+// scripts/build-userscript.mjs. See that script for why it isn't inlined here.
 //
 // Fully generic: no Grafana instance, dashboard UID, or template-variable name is
 // baked in. On first use (or whenever nothing configured applies to the current

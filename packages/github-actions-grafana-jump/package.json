@@ -2,9 +2,9 @@
   "name": "@nsheaps/gm-github-actions-grafana-jump",
   "version": "0.2.0",
   "main": "dist/index.js",
-  "private": true,
+  "greasyforkPublish": true,
   "scripts": {
-    "build": "tsc --build",
+    "build": "tsc --build && node ../../scripts/build-userscript.mjs",
     "lint": "oxlint",
     "test": "tsc --build && node --test test/*.test.js"
   },
