@@ -11,10 +11,18 @@ name: Release
 # conflicts on the same version lines.
 #
 # On push to main: the SOLE place bumps are committed. One job runs
-# release-it per changed package, makes ONE commit, and does ONE atomic push of
-# that commit plus the release tags. Doing the bump, the lint and the tag move
-# in a single push is what stops a bump from triggering a follow-up
+# release-it per changed package, makes the bump commit, and does ONE atomic
+# push of that commit plus the release tags. Doing the bump, the lint and the
+# tag move in a single push is what stops a bump from triggering a follow-up
 # lint/format commit that would trigger another bump.
+#
+# A second commit, stacked on top of the bump commit but never merged into
+# main, adds the built .user.js files to git. GreasyFork's webhook-triggered
+# sync does `git show <ref>:<path>` against the real repository - it cannot
+# see files that only exist as GitHub Release binary assets. Tagging that
+# second commit (as the release tag, and as the floating `latest` tag) gives
+# GreasyFork a git ref it can read the built file from, without ever putting
+# build artifacts in main's history.
 
 on:
   push:
@@ -151,7 +159,7 @@ jobs:
         if: steps.bump.outputs.has-bumps == 'true'
         run: yarn run lint
 
-      - name: Commit bumps and tag
+      - name: Commit bumps
         id: commit
         if: steps.bump.outputs.has-bumps == 'true'
         env:
@@ -171,9 +179,54 @@ jobs:
             # [skip ci] keeps this bump commit from re-triggering this workflow.
             git commit -m "chore(release): bump userscript versions [skip ci]"
           fi
+          echo "bump-sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Build bumped packages
+        if: steps.bump.outputs.has-bumps == 'true'
+        run: yarn run build
+
+      - name: Commit built userscripts for GreasyFork sync
+        id: dist-commit
+        if: steps.bump.outputs.has-bumps == 'true'
+        env:
+          GIT_AUTHOR_NAME: ${{ steps.auth.outputs.user-name }}
+          GIT_AUTHOR_EMAIL: ${{ steps.auth.outputs.user-email }}
+          GIT_COMMITTER_NAME: ${{ steps.auth.outputs.user-name }}
+          GIT_COMMITTER_EMAIL: ${{ steps.auth.outputs.user-email }}
+        run: |
+          set -euo pipefail
+          # dist/ is gitignored for normal development. Force-add just the
+          # built files GreasyFork needs to read via `git show`.
+          for pkg_dir in packages/*/; do
+            pkg_name="$(basename "$pkg_dir")"
+            pjson="${pkg_dir}package.json"
+            [ -f "$pjson" ] || continue
+            opted_in="$(node -pe "require('./$pjson').greasyforkPublish === true" 2>/dev/null || echo false)"
+            [ "$opted_in" = "true" ] || continue
+
+            src="packages/${pkg_name}/dist/script.user.js"
+            if [ ! -f "$src" ]; then
+              echo "::error::greasyforkPublish is set for $pkg_name but $src is missing after build"
+              exit 1
+            fi
+            git add -f "$src"
+          done
+          git commit -m "chore(release): include built userscripts for GreasyFork sync [skip ci]"
+          echo "dist-sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Tag release
+        id: tag
+        if: steps.bump.outputs.has-bumps == 'true'
+        env:
+          GIT_AUTHOR_NAME: ${{ steps.auth.outputs.user-name }}
+          GIT_AUTHOR_EMAIL: ${{ steps.auth.outputs.user-email }}
+          GIT_COMMITTER_NAME: ${{ steps.auth.outputs.user-name }}
+          GIT_COMMITTER_EMAIL: ${{ steps.auth.outputs.user-email }}
+        run: |
+          set -euo pipefail
           # One immutable tag per release run, carrying the GitHub Release the
-          # userscripts' @downloadURL/@updateURL resolve through.
+          # userscripts' @downloadURL/@updateURL resolve through. It points at
+          # the dist commit (not main), so it carries the built files.
           #
           # JUDGEMENT CALL: one shared release per run, not one per package.
           # Every published script's @downloadURL points at the stable
@@ -189,28 +242,32 @@ jobs:
           # its own version in its package.json and its own CHANGELOG.md.
           RELEASE_TAG="release/$(date -u +%Y%m%d-%H%M%S)"
           git tag -a "$RELEASE_TAG" -m "Release $RELEASE_TAG"
-          git tag -f "release/last-run" HEAD
+          # Floating tag GreasyFork sync identifiers point at (raw.githubusercontent.com
+          # .../refs/tags/latest/...) so each script's sync URL never has to change again.
+          git tag -f "latest" HEAD
+          # release/last-run stays on the bump commit (not the dist commit) -
+          # it's the base the NEXT run diffs source changes against.
+          git tag -f "release/last-run" "${{ steps.commit.outputs.bump-sha }}"
           echo "release-tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Build bumped packages
-        if: steps.bump.outputs.has-bumps == 'true'
-        run: yarn run build
 
       - name: Push commit and tags
         if: steps.bump.outputs.has-bumps == 'true'
         run: |
-          # Single atomic push: the bump commit, the new release tag, and the
-          # moved marker land together or not at all, so a partial failure can
-          # never leave the marker ahead of the commit it describes.
-          git push --atomic origin HEAD \
-            "refs/tags/${{ steps.commit.outputs.release-tag }}" \
+          set -euo pipefail
+          # main only fast-forwards to the bump commit - the dist commit
+          # stacked on top of it is pushed solely as tags, never as a branch
+          # update, so main's history never gains build artifacts.
+          git push --atomic origin \
+            "${{ steps.commit.outputs.bump-sha }}:refs/heads/main" \
+            "refs/tags/${{ steps.tag.outputs.release-tag }}" \
+            "+refs/tags/latest" \
             "+refs/tags/release/last-run"
 
       - name: Create the GitHub Release
         if: steps.bump.outputs.has-bumps == 'true'
         env:
           GH_TOKEN: ${{ steps.auth.outputs.token }}
-          RELEASE_TAG: ${{ steps.commit.outputs.release-tag }}
+          RELEASE_TAG: ${{ steps.tag.outputs.release-tag }}
           REPORT_MD: ${{ steps.bump.outputs.report-md }}
         run: |
           set -euo pipefail
@@ -225,7 +282,7 @@ jobs:
         if: steps.bump.outputs.has-bumps == 'true'
         env:
           GH_TOKEN: ${{ steps.auth.outputs.token }}
-          RELEASE_TAG: ${{ steps.commit.outputs.release-tag }}
+          RELEASE_TAG: ${{ steps.tag.outputs.release-tag }}
         run: |
           set -euo pipefail
           UPLOAD_DIR="$(mktemp -d)"
