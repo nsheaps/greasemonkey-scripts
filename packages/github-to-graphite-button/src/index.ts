@@ -8,7 +8,7 @@ const SELECTOR = '[class^="gh-header-actions"]';
 const addButton = (toolbar: HTMLElement) => {
   const match = window.location.pathname.match(PATH_REGEX);
   if (!match) return;
-  
+
   const [_, org, repo, pr] = match;
   const graphiteLink = `https://app.graphite.dev/github/pr/${org}/${repo}/${pr}/`;
 
