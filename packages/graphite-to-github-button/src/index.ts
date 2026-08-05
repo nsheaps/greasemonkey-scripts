@@ -9,7 +9,7 @@ const SELECTOR =
 const addButton = (toolbar: HTMLElement) => {
   const match = window.location.pathname.match(PATH_REGEX);
   if (!match) return;
-  
+
   const [_, org, repo, pr] = match;
   const gitHubLink = `https://github.com/${org}/${repo}/pull/${pr}`;
 
