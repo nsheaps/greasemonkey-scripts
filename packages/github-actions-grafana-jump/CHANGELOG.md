@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.2](https://github.com/nsheaps/greasemonkey-scripts/compare/release/last-run...0.2.2) (2026-08-06)
+
+### Features
+
+* set [@author](https://github.com/author) consistently on all three published userscripts ([#37](https://github.com/nsheaps/greasemonkey-scripts/issues/37)) ([5021294](https://github.com/nsheaps/greasemonkey-scripts/commit/5021294e245bbd6d0b3eb6e77d5893a5966483fa))
+
 ## [0.2.1](https://github.com/nsheaps/greasemonkey-scripts/compare/release/20260805-014053...0.2.1) (2026-08-05)
 
 ### Features
