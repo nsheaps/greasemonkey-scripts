@@ -1,6 +1,7 @@
 {
   "name": "Github => Graphite button",
   "description": "Add a button to go from app.graphite.dev to github.com",
+  "author": "Nathan Heaps",
   "namespace": "https://www.github.com",
   "match": ["http*://www.github.com/*", "http*://github.com/*"],
   "run-at": "document-start",
