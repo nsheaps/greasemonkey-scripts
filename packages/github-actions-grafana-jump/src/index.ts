@@ -5,11 +5,14 @@
 // Fully generic: no Grafana instance, dashboard UID, or template-variable name is
 // baked in. On first use (or whenever nothing configured applies to the current
 // page) the jump button opens an in-page configuration panel where you enter your
-// own Grafana base URL and one or more dashboards, each with the template-variable
-// names it uses for filtering by branch / PR number / workflow file / runner. Once
-// configured, the button jumps straight to the matching dashboard, with a small
-// "▾" menu to pick among multiple configured dashboards or to reopen the config
-// panel. Config is persisted via GM.setValue/GM.getValue, scoped to this script.
+// own Grafana base URL and one or more jump targets - either a dashboard, or a
+// Tempo trace search - each declaring which page-provided fields it filters or
+// templates by (branch, PR number, workflow file, runner, runner group, workflow
+// run ID, job ID). A target only shows up on pages that actually provide every
+// field it references. Once configured, the button jumps straight to the best
+// match, with a small "▾" menu to pick among multiple applicable targets or to
+// reopen the config panel. Config is persisted via GM.setValue/GM.getValue,
+// scoped to this script.
 //
 // The `var-<name>=<value>` query-param convention used to preset a Grafana
 // dashboard's template variables from a URL is a genuine, documented Grafana
@@ -25,26 +28,119 @@
 // ---------------------------------------------------------------------------
 
 interface DashboardVarNames {
+  repo?: string;
   branch?: string;
   prNumber?: string;
   workflowName?: string;
   runnerName?: string;
+  runnerGroupName?: string;
+  runId?: string;
+  jobId?: string;
 }
 
-interface DashboardConfig {
+/** The fixed set of page-provided fields a jump target can filter/template by. */
+type ContextFieldKey = keyof DashboardVarNames;
+
+const CONTEXT_FIELD_KEYS: readonly ContextFieldKey[] = [
+  "repo",
+  "branch",
+  "prNumber",
+  "workflowName",
+  "runnerName",
+  "runnerGroupName",
+  "runId",
+  "jobId",
+];
+
+function isContextFieldKey(key: string): key is ContextFieldKey {
+  return (CONTEXT_FIELD_KEYS as readonly string[]).includes(key);
+}
+
+/**
+ * A jump target that links straight to a Grafana dashboard (`/d/<uid>/<slug>`),
+ * with any of its own template variables preset via the `var-<name>=<value>`
+ * query convention - see buildDashboardUrl().
+ */
+interface DashboardTarget {
+  type: "dashboard";
   name: string;
   uid: string;
   slug: string;
   varNames: DashboardVarNames;
 }
 
+/**
+ * A jump target that opens a Grafana Explore pane running a TraceQL search
+ * against a Tempo datasource, rather than a fixed dashboard - useful when
+ * there's no dashboard UID to jump to, only a trace/span you want to *find*
+ * by an attribute like a GitHub Actions run or job ID. `query` is a TraceQL
+ * string with `{{fieldKey}}` placeholders (any ContextFieldKey) substituted
+ * from the current page - see renderTemplate(). A target's required fields
+ * are inferred from which placeholders its own query actually uses, the same
+ * way a DashboardTarget's required fields come from which varNames entries
+ * are filled in - see requiredFields().
+ */
+interface TraceTarget {
+  type: "trace";
+  name: string;
+  // A user-chosen stable identifier, since (unlike a DashboardTarget) there's
+  // no Grafana-assigned UID to dedupe on when exporting/merging configs.
+  id: string;
+  datasourceUid: string;
+  query: string;
+}
+
+type JumpTargetConfig = DashboardTarget | TraceTarget;
+
 interface GrafanaJumpConfig {
   baseUrl: string;
-  dashboards: DashboardConfig[];
+  dashboards: JumpTargetConfig[];
 }
 
 function defaultConfig(): GrafanaJumpConfig {
   return { baseUrl: "", dashboards: [] };
+}
+
+function normalizeVarNames(raw: unknown): DashboardVarNames {
+  const varNamesRaw = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+  const varNames: DashboardVarNames = {};
+  for (const key of CONTEXT_FIELD_KEYS) {
+    const value = varNamesRaw[key];
+    if (typeof value === "string" && value.trim() !== "") {
+      varNames[key] = value.trim();
+    }
+  }
+  return varNames;
+}
+
+/**
+ * Reshapes one raw dashboards[] entry into a well-formed JumpTargetConfig, or
+ * null if it's malformed enough that it can never be jumped to (no uid for a
+ * dashboard, or a missing id/datasourceUid/query for a trace search) - callers
+ * drop nulls rather than keeping a target that would only ever produce a
+ * broken link. Anything without `type: "trace"` is treated as a dashboard,
+ * which also covers the format's original shape (no `type` field at all).
+ */
+function normalizeTarget(raw: Record<string, unknown>): JumpTargetConfig | null {
+  const name = typeof raw.name === "string" ? raw.name.trim() : "";
+
+  if (raw.type === "trace") {
+    const id = typeof raw.id === "string" ? raw.id.trim() : "";
+    const datasourceUid = typeof raw.datasourceUid === "string" ? raw.datasourceUid.trim() : "";
+    // A query can't contain a newline in the YAML-lite format it also has to
+    // round-trip through (see "Repo config parsing" below), which has no
+    // multi-line scalar support - collapse one defensively rather than
+    // silently exporting an invalid file.
+    const query = typeof raw.query === "string" ? raw.query.replace(/\s*\n\s*/g, " ").trim() : "";
+    if (id === "" || datasourceUid === "" || query === "") return null;
+    return { type: "trace", name, id, datasourceUid, query };
+  }
+
+  const uid = typeof raw.uid === "string" ? raw.uid.trim() : "";
+  const slug = typeof raw.slug === "string" ? raw.slug.trim() : "";
+  const varNames = normalizeVarNames(raw.varNames);
+  if (uid === "") return null;
+  return { type: "dashboard", name, uid, slug, varNames };
 }
 
 /**
@@ -59,30 +155,10 @@ function normalizeConfig(raw: unknown): GrafanaJumpConfig {
   const baseUrl = typeof obj.baseUrl === "string" ? obj.baseUrl.trim() : "";
 
   const dashboardsRaw = Array.isArray(obj.dashboards) ? obj.dashboards : [];
-  const dashboards: DashboardConfig[] = dashboardsRaw
+  const dashboards = dashboardsRaw
     .filter((d): d is Record<string, unknown> => typeof d === "object" && d !== null)
-    .map((d) => {
-      const varNamesRaw =
-        typeof d.varNames === "object" && d.varNames !== null
-          ? (d.varNames as Record<string, unknown>)
-          : {};
-      const varNames: DashboardVarNames = {};
-      for (const key of ["branch", "prNumber", "workflowName", "runnerName"] as const) {
-        const value = varNamesRaw[key];
-        if (typeof value === "string" && value.trim() !== "") {
-          varNames[key] = value.trim();
-        }
-      }
-      return {
-        name: typeof d.name === "string" ? d.name.trim() : "",
-        uid: typeof d.uid === "string" ? d.uid.trim() : "",
-        slug: typeof d.slug === "string" ? d.slug.trim() : "",
-        varNames,
-      };
-    })
-    // A dashboard with no uid can't be jumped to; drop it rather than emit a
-    // broken link.
-    .filter((d) => d.uid !== "");
+    .map(normalizeTarget)
+    .filter((d): d is JumpTargetConfig => d !== null);
 
   return { baseUrl, dashboards };
 }
@@ -129,7 +205,30 @@ interface WorkflowContext {
   workflowFile: string;
 }
 
-type JumpContext = PrContext | BranchContext | RunnerContext | WorkflowContext;
+interface RunnerGroupContext {
+  kind: "runnerGroup";
+  org: string;
+  groupId: string;
+}
+
+interface RunContext {
+  kind: "run";
+  org: string;
+  repo: string;
+  runId: string;
+  // Only present when the URL drills into one job's logs within the run
+  // (`/actions/runs/<id>/job/<jobId>`) - the run's own overview page has no
+  // single job to filter by.
+  jobId?: string;
+}
+
+type JumpContext =
+  | PrContext
+  | BranchContext
+  | RunnerContext
+  | WorkflowContext
+  | RunnerGroupContext
+  | RunContext;
 
 /**
  * Matches a pull request's own pages (Conversation/Commits/Checks/Files changed),
@@ -201,6 +300,19 @@ function parseRunnerContext(pathname: string): RunnerContext | null {
 }
 
 /**
+ * Matches an organization's runner group detail page, e.g.
+ * `/organizations/<org>/settings/actions/runner-groups/<id>`. Runner groups
+ * are an org-level concept for pooling self-hosted runners across repos, so
+ * unlike parseRunnerContext there's no repo-scoped equivalent to match.
+ */
+function parseRunnerGroupContext(pathname: string): RunnerGroupContext | null {
+  const match = pathname.match(/^\/organizations\/([^/]+)\/settings\/actions\/runner-groups\/(\d+)/);
+  if (!match) return null;
+  const [, org, groupId] = match;
+  return { kind: "runnerGroup", org, groupId };
+}
+
+/**
  * Matches a single workflow's own page, showing its runs across all branches,
  * e.g. `/org/repo/actions/workflows/ci.yml`.
  */
@@ -212,81 +324,126 @@ function parseWorkflowContext(pathname: string): WorkflowContext | null {
 }
 
 /**
- * Resolves the current location into whichever jump context applies (PR/branch,
- * runner, or workflow-across-branches), or null if none match. Order doesn't
- * matter for correctness here since the four path shapes are mutually
- * exclusive, but runner and workflow paths are checked first since they're the
- * most specific.
+ * Matches a workflow run's own page, and optionally one job's logs within it,
+ * e.g. `/org/repo/actions/runs/123456` or `/org/repo/actions/runs/123456/job/789`.
+ */
+function parseRunContext(pathname: string): RunContext | null {
+  const match = pathname.match(/^\/([^/]+)\/([^/]+)\/actions\/runs\/(\d+)(?:\/job\/(\d+))?/);
+  if (!match) return null;
+  const [, org, repo, runId, jobId] = match;
+  return jobId ? { kind: "run", org, repo, runId, jobId } : { kind: "run", org, repo, runId };
+}
+
+/**
+ * Resolves the current location into whichever jump context applies, or null
+ * if none match. Order doesn't matter for correctness here since the path
+ * shapes are mutually exclusive, but the more specific runner/run paths are
+ * checked first per the existing convention.
  */
 function resolveJumpContext(pathname: string, search: string): JumpContext | null {
   return (
+    parseRunnerGroupContext(pathname) ??
     parseRunnerContext(pathname) ??
+    parseRunContext(pathname) ??
     parseWorkflowContext(pathname) ??
     parsePrContext(pathname) ??
     parseBranchContext(pathname, search)
   );
 }
 
-/** Which DashboardVarNames key a given context kind is filtered by. */
-function contextVarKey(kind: JumpContext["kind"]): keyof DashboardVarNames {
-  switch (kind) {
-    case "pr":
-      return "prNumber";
-    case "branch":
-      return "branch";
-    case "workflow":
-      return "workflowName";
-    case "runner":
-      return "runnerName";
-  }
-}
-
-/** The raw filter value (PR number, branch name, etc.) carried by a context. */
-function contextFilterValue(context: JumpContext): string {
+/**
+ * All page-provided fields available for a given context, keyed the same way
+ * as DashboardVarNames / a trace query's `{{placeholders}}`. Only the fields
+ * the current page actually carries are present - a jump target only shows
+ * up when every field it references (see requiredFields()) is one of these.
+ * `repo` is included for every context scoped to a single repo (everything
+ * except the org-scoped runner and runnerGroup pages), not just
+ * workflow/branch contexts, so a target that only cares about the repo name
+ * can show up anywhere within that repo.
+ */
+function contextFields(context: JumpContext): Partial<Record<ContextFieldKey, string>> {
   switch (context.kind) {
     case "pr":
-      return context.prNumber;
+      return { repo: context.repo, prNumber: context.prNumber };
     case "branch":
-      return context.branch;
+      return { repo: context.repo, branch: context.branch };
     case "workflow":
-      return context.workflowFile;
+      return { repo: context.repo, workflowName: context.workflowFile };
+    case "run":
+      return {
+        repo: context.repo,
+        runId: context.runId,
+        ...(context.jobId ? { jobId: context.jobId } : {}),
+      };
     case "runner":
-      return context.runnerId;
+      return {
+        ...(context.repo ? { repo: context.repo } : {}),
+        runnerName: context.runnerId,
+      };
+    case "runnerGroup":
+      return { runnerGroupName: context.groupId };
   }
 }
 
 /**
- * Which of the configured dashboards can actually be jumped to for this
- * context - i.e. have a template-variable name configured for the field this
- * context kind filters by. A dashboard with no matching varName is left out
- * rather than linked to with no filter applied.
+ * Which of a target's configured fields (varNames entries for a dashboard,
+ * or `{{placeholder}}` references for a trace query) it needs present on the
+ * page to be jumpable. A target with none configured is treated as needing
+ * something it can never match, not as universally applicable.
  */
-function applicableDashboards(config: GrafanaJumpConfig, context: JumpContext): DashboardConfig[] {
-  const key = contextVarKey(context.kind);
-  return config.dashboards.filter((dashboard) => Boolean(dashboard.varNames[key]));
+function requiredFields(target: JumpTargetConfig): ContextFieldKey[] {
+  if (target.type === "trace") {
+    const found = new Set<ContextFieldKey>();
+    const placeholderPattern = /\{\{(\w+)\}\}/g;
+    let match: RegExpExecArray | null;
+    while ((match = placeholderPattern.exec(target.query))) {
+      if (isContextFieldKey(match[1])) found.add(match[1]);
+    }
+    return [...found];
+  }
+  return CONTEXT_FIELD_KEYS.filter((key) => Boolean(target.varNames[key]));
+}
+
+/**
+ * Which of the configured dashboards/traces can actually be jumped to for
+ * this context - i.e. every field the target is configured to filter or
+ * template by is one this context's page actually provides (see
+ * contextFields() and requiredFields()). A target that needs a field this
+ * page doesn't have is left out entirely, rather than linked to with that
+ * filter silently dropped.
+ */
+function applicableDashboards(config: GrafanaJumpConfig, context: JumpContext): JumpTargetConfig[] {
+  const fields = contextFields(context);
+  return config.dashboards.filter((target) => {
+    const required = requiredFields(target);
+    return required.length > 0 && required.every((key) => Boolean(fields[key]));
+  });
 }
 
 /**
  * The {org, repo} a jump context belongs to, for looking up that repo's
  * `.github/jump-links.config.yaml` - or null when the context isn't scoped to
- * one repo (an org-scoped runner page covers every repo in the org, so there's
- * no single repo config to fetch).
+ * one repo (an org-scoped runner or runner-group page covers every repo in
+ * the org, so there's no single repo config to fetch).
  */
 function repoContextForJump(context: JumpContext): { org: string; repo: string } | null {
   switch (context.kind) {
     case "pr":
     case "branch":
     case "workflow":
+    case "run":
       return { org: context.org, repo: context.repo };
     case "runner":
       return context.repo ? { org: context.org, repo: context.repo } : null;
+    case "runnerGroup":
+      return null;
   }
 }
 
-/** One dashboard paired with the base URL of the config it came from. */
+/** One jump target paired with the base URL of the config it came from. */
 interface ActiveDashboard {
   baseUrl: string;
-  dashboard: DashboardConfig;
+  dashboard: JumpTargetConfig;
 }
 
 /**
@@ -317,30 +474,40 @@ function activeDashboards(
 }
 
 /**
+ * A stable identity for deduping targets on export - a dashboard's own
+ * Grafana uid, or a trace target's user-chosen id (traces have no
+ * Grafana-assigned uid of their own to dedupe on).
+ */
+function targetKey(target: JumpTargetConfig): string {
+  return target.type === "trace" ? `trace:${target.id}` : `dashboard:${target.uid}`;
+}
+
+/**
  * Combines a repo's existing checked-in config with the current user's own
  * config, for exporting back into the repo - unlike activeDashboards() above,
  * this is a real union: the point of exporting is to publish your personal
- * dashboards for the rest of the repo, on top of whatever's already shared,
- * not to pick one source over the other. Dashboards are deduped by uid,
- * preferring the repo's own copy of a uid that appears in both (it may have
- * been intentionally edited by someone else since you last synced). baseUrl
- * prefers the repo's if it has one, since the merged dashboard list is
- * exported as a single file with one shared baseUrl field - if your personal
- * dashboards actually live under a *different* Grafana instance than the
- * repo's, this merge would produce an incorrect shared baseUrl for one set of
- * them; that caveat is surfaced in the exported file's header comment rather
- * than silently guessed at here.
+ * dashboards/traces for the rest of the repo, on top of whatever's already
+ * shared, not to pick one source over the other. Targets are deduped by
+ * targetKey(), preferring the repo's own copy of a key that appears in both
+ * (it may have been intentionally edited by someone else since you last
+ * synced). baseUrl prefers the repo's if it has one, since the merged target
+ * list is exported as a single file with one shared baseUrl field - if your
+ * personal targets actually live under a *different* Grafana instance than
+ * the repo's, this merge would produce an incorrect shared baseUrl for one
+ * set of them; that caveat is surfaced in the exported file's header comment
+ * rather than silently guessed at here.
  */
 function mergeConfigsForExport(
   repoConfig: GrafanaJumpConfig | null,
   personalConfig: GrafanaJumpConfig,
 ): GrafanaJumpConfig {
   const merged = repoConfig ? [...repoConfig.dashboards] : [];
-  const knownUids = new Set(merged.map((d) => d.uid));
-  for (const dashboard of personalConfig.dashboards) {
-    if (!knownUids.has(dashboard.uid)) {
-      merged.push(dashboard);
-      knownUids.add(dashboard.uid);
+  const knownKeys = new Set(merged.map(targetKey));
+  for (const target of personalConfig.dashboards) {
+    const key = targetKey(target);
+    if (!knownKeys.has(key)) {
+      merged.push(target);
+      knownKeys.add(key);
     }
   }
   return {
@@ -366,15 +533,77 @@ function buildDashboardUrl(
 }
 
 /**
- * Builds the Grafana jump URL for one dashboard against a resolved context.
- * Assumes the dashboard is applicable (see applicableDashboards) - callers that
- * skip that check will just get a link with no var- filter applied.
+ * Substitutes `{{fieldKey}}` placeholders in a TraceQL query template with
+ * values from the current context (see contextFields()). A placeholder for a
+ * field this page doesn't actually have (which shouldn't happen for a target
+ * requiredFields() already gated as applicable, but could for a stray typo
+ * in the query) is left untouched rather than silently blanked out, so a
+ * malformed query is visibly broken instead of quietly matching too much.
  */
-function buildJumpUrl(baseUrl: string, dashboard: DashboardConfig, context: JumpContext): string {
-  const key = contextVarKey(context.kind);
-  const varName = dashboard.varNames[key];
-  const vars = varName ? { [varName]: contextFilterValue(context) } : {};
-  return buildDashboardUrl(baseUrl, dashboard, vars);
+function renderTemplate(template: string, fields: Partial<Record<ContextFieldKey, string>>): string {
+  return template.replace(/\{\{(\w+)\}\}/g, (whole, key: string) => {
+    const value = isContextFieldKey(key) ? fields[key] : undefined;
+    return value ?? whole;
+  });
+}
+
+/**
+ * Builds a Grafana Explore URL running a TraceQL search against a Tempo
+ * datasource - the `panes` query param is the same shape Explore itself
+ * generates when you build a query there by hand (an object keyed by an
+ * arbitrary pane id, JSON-encoded into the URL). There's no way to know how
+ * far back a given GitHub Actions run's trace lives, so this always searches
+ * the last 7 days; widen the range in Grafana itself for anything older.
+ */
+function buildTraceExploreUrl(
+  baseUrl: string,
+  target: TraceTarget,
+  fields: Partial<Record<ContextFieldKey, string>>,
+): string {
+  const pane = {
+    datasource: target.datasourceUid,
+    queries: [
+      {
+        refId: "A",
+        queryType: "traceql",
+        query: renderTemplate(target.query, fields),
+        datasource: { uid: target.datasourceUid },
+      },
+    ],
+    range: { from: "now-7d", to: "now" },
+  };
+  const params = new URLSearchParams({
+    schemaVersion: "1",
+    orgId: "1",
+    panes: JSON.stringify({ jump: pane }),
+  });
+  return `${baseUrl}/explore?${params.toString()}`;
+}
+
+/**
+ * Builds the Grafana jump URL for one target against a resolved context - a
+ * dashboard link with its own var- filters preset, or a Tempo trace search
+ * with its query template filled in. Assumes the target is applicable (see
+ * applicableDashboards) - callers that skip that check just get a link with
+ * whichever filters/placeholders the page happens to provide, silently
+ * omitted otherwise.
+ */
+function buildJumpUrl(baseUrl: string, target: JumpTargetConfig, context: JumpContext): string {
+  const fields = contextFields(context);
+  if (target.type === "trace") return buildTraceExploreUrl(baseUrl, target, fields);
+
+  const vars: Record<string, string> = {};
+  for (const key of CONTEXT_FIELD_KEYS) {
+    const varName = target.varNames[key];
+    const value = fields[key];
+    if (varName && value) vars[varName] = value;
+  }
+  return buildDashboardUrl(baseUrl, target, vars);
+}
+
+/** name if set, else whatever stable identifier the target has instead. */
+function targetDisplayName(target: JumpTargetConfig): string {
+  return target.name || (target.type === "trace" ? target.id : target.uid);
 }
 
 /** Human-readable label for the jump button, specific to the matched context. */
@@ -386,8 +615,14 @@ function labelForContext(context: JumpContext): string {
       return `Grafana: ${context.branch} CI`;
     case "workflow":
       return `Grafana: ${context.workflowFile} runs`;
+    case "run":
+      return context.jobId
+        ? `Grafana: run #${context.runId} / job #${context.jobId}`
+        : `Grafana: run #${context.runId}`;
     case "runner":
       return `Grafana: runner ${context.runnerId}`;
+    case "runnerGroup":
+      return `Grafana: runner group ${context.groupId}`;
   }
 }
 
@@ -428,11 +663,19 @@ function tokenizeYamlLite(text: string): YamlLiteLine[] {
 
 function unquoteYamlLiteScalar(value: string): string {
   const trimmed = value.trim();
-  const isQuoted =
-    trimmed.length >= 2 &&
-    ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-      (trimmed.startsWith("'") && trimmed.endsWith("'")));
-  return isQuoted ? trimmed.slice(1, -1) : trimmed;
+  if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    // Reverses the escaping yamlLiteScalar() applies when it double-quotes a
+    // value: a backslash followed by a backslash or a double quote is that
+    // literal character, unescaped. Single-quoted scalars (below) never get
+    // this treatment - yamlLiteScalar() only ever produces double-quoted
+    // output; single-quote support here is only for reading hand-written
+    // ones, which this format has no backslash-escaping convention for.
+    return trimmed.slice(1, -1).replace(/\\(["\\])/g, "$1");
+  }
+  if (trimmed.length >= 2 && trimmed.startsWith("'") && trimmed.endsWith("'")) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
 }
 
 function isYamlLiteSeqItem(content: string): boolean {
@@ -557,19 +800,24 @@ function configToYamlLite(config: GrafanaJumpConfig): string {
   }
 
   lines.push("dashboards:");
-  for (const dashboard of config.dashboards) {
-    lines.push(`  - name: ${yamlLiteScalar(dashboard.name)}`);
-    lines.push(`    uid: ${yamlLiteScalar(dashboard.uid)}`);
-    lines.push(`    slug: ${yamlLiteScalar(dashboard.slug)}`);
-    const varEntries = Object.entries(dashboard.varNames).filter(
-      (entry): entry is [string, string] => typeof entry[1] === "string" && entry[1] !== "",
-    );
+  for (const target of config.dashboards) {
+    lines.push(`  - type: ${yamlLiteScalar(target.type)}`);
+    lines.push(`    name: ${yamlLiteScalar(target.name)}`);
+    if (target.type === "trace") {
+      lines.push(`    id: ${yamlLiteScalar(target.id)}`);
+      lines.push(`    datasourceUid: ${yamlLiteScalar(target.datasourceUid)}`);
+      lines.push(`    query: ${yamlLiteScalar(target.query)}`);
+      continue;
+    }
+    lines.push(`    uid: ${yamlLiteScalar(target.uid)}`);
+    lines.push(`    slug: ${yamlLiteScalar(target.slug)}`);
+    const varEntries = CONTEXT_FIELD_KEYS.filter((key) => Boolean(target.varNames[key]));
     if (varEntries.length === 0) {
       lines.push("    varNames: {}");
     } else {
       lines.push("    varNames:");
-      for (const [key, value] of varEntries) {
-        lines.push(`      ${key}: ${yamlLiteScalar(value)}`);
+      for (const key of varEntries) {
+        lines.push(`      ${key}: ${yamlLiteScalar(target.varNames[key] as string)}`);
       }
     }
   }
@@ -698,31 +946,76 @@ function buildCreateFileUrl(org: string, repo: string, branch: string, path: str
 
 const REPO_CONFIG_TEMPLATE = `# Config for the "GitHub Actions => Grafana jump button" userscript
 # (https://github.com/nsheaps/greasemonkey-scripts/tree/main/packages/github-actions-grafana-jump).
-# Gives every contributor to this repo the same dashboards without each of
+# Gives every contributor to this repo the same jump targets without each of
 # them configuring the userscript by hand. A contributor's own personal
 # config (set via the userscript's own "Set up Grafana jump" panel) always
 # takes priority over this file for any page it covers - this is only a
 # fallback for pages nobody has personally configured.
 #
 # baseUrl: your Grafana instance's base URL (no trailing slash).
-# dashboards: one entry per dashboard you want jumpable to. For each:
-#   name     - display label for the jump button/menu.
-#   uid      - the dashboard's UID (Grafana dashboard settings -> JSON Model,
-#              or the segment right after /d/ in the dashboard's URL).
-#   slug     - the URL slug right after the uid in the dashboard's URL.
-#   varNames - which of this dashboard's template variables (if any) to
-#              preset from the current GitHub page. Leave a field out if the
-#              dashboard doesn't use that kind of filter.
+# dashboards: one entry per jump target. Each entry is either a Grafana
+#   dashboard link (type: dashboard) or a Tempo trace search (type: trace). A
+#   target only shows up as a jump target on pages that provide every field
+#   it's configured to use - not all fields are available on every page (a
+#   branch's Actions page has no workflow run ID, for example), so different
+#   targets naturally show up on different pages.
+#
+#   type: dashboard
+#     name     - display label for the jump button/menu.
+#     uid      - the dashboard's UID (Grafana dashboard settings -> JSON
+#                Model, or the segment right after /d/ in the dashboard's
+#                URL).
+#     slug     - the URL slug right after the uid in the dashboard's URL.
+#     varNames - which of this dashboard's template variables (if any) to
+#                preset from the current GitHub page. Leave a field out if
+#                the dashboard doesn't use that kind of filter. Available
+#                fields: repo, branch, prNumber, workflowName, runnerName,
+#                runnerGroupName, runId, jobId.
+#
+#   type: trace
+#     name          - display label for the jump button/menu.
+#     id            - any string unique among your trace targets; used only
+#                      to dedupe when exporting/merging this file, not shown
+#                      anywhere.
+#     datasourceUid - the Tempo datasource's UID in Grafana (Connections ->
+#                     Data sources -> your Tempo source -> the "uid" in its
+#                     URL or Settings JSON).
+#     query         - a TraceQL query with \`{{fieldKey}}\` placeholders (the
+#                     same field names as varNames above) filled in from the
+#                     current GitHub page - adjust the attribute names below
+#                     (e.g. resource.github.run_id) to match however your own
+#                     traces are tagged.
 baseUrl: https://grafana.example.com
 dashboards:
-  - name: CI Overview
+  - type: dashboard
+    name: Workflow runs for this repo
     uid: REPLACE_WITH_DASHBOARD_UID
     slug: REPLACE_WITH_DASHBOARD_SLUG
     varNames:
-      branch: branch
-      prNumber: pr_number
-      workflowName: workflow_file
+      repo: repository
+  - type: dashboard
+    name: Workflow runs on this runner
+    uid: REPLACE_WITH_DASHBOARD_UID
+    slug: REPLACE_WITH_DASHBOARD_SLUG
+    varNames:
       runnerName: runner_name
+  - type: dashboard
+    name: Workflow runs for this branch
+    uid: REPLACE_WITH_DASHBOARD_UID
+    slug: REPLACE_WITH_DASHBOARD_SLUG
+    varNames:
+      repo: repository
+      branch: branch
+  - type: trace
+    name: Trace for this workflow run
+    id: workflow-run-trace
+    datasourceUid: REPLACE_WITH_TEMPO_DATASOURCE_UID
+    query: '{resource.github.run_id="{{runId}}"}'
+  - type: trace
+    name: Span for this job
+    id: workflow-job-span
+    datasourceUid: REPLACE_WITH_TEMPO_DATASOURCE_UID
+    query: '{resource.github.run_id="{{runId}}" && resource.github.job_id="{{jobId}}"}'
 `;
 
 // ---------------------------------------------------------------------------
@@ -823,7 +1116,7 @@ function openConfigModal(repoCtx: { org: string; repo: string } | null): void {
   // Work on a deep-ish draft copy so Cancel leaves the saved config untouched.
   const draft: GrafanaJumpConfig = {
     baseUrl: currentConfig.baseUrl,
-    dashboards: currentConfig.dashboards.map((d) => ({ ...d, varNames: { ...d.varNames } })),
+    dashboards: currentConfig.dashboards.map((d) => (d.type === "trace" ? { ...d } : { ...d, varNames: { ...d.varNames } })),
   };
 
   const overlay = document.createElement("div");
@@ -852,10 +1145,11 @@ function openConfigModal(repoCtx: { org: string; repo: string } | null): void {
 
   const help = document.createElement("p");
   help.textContent =
-    "Set your Grafana base URL and the dashboards to jump to. For each dashboard, " +
-    "fill in whichever template-variable names it uses (dashboard settings -> " +
-    "Variables) - leave the rest blank. A dashboard only shows up as a jump target " +
-    "on pages matching a variable name you've filled in.";
+    "Set your Grafana base URL and the jump targets to offer - a dashboard link, or a " +
+    "Tempo trace search. For a dashboard, fill in whichever template-variable names it " +
+    "uses (dashboard settings -> Variables); for a trace, write a TraceQL query using " +
+    "{{fieldKey}} placeholders. A target only shows up on a page that provides every " +
+    "field it references - leave fields blank/out of the query if a target doesn't need them.";
   help.setAttribute("style", "margin: 0 0 16px; font-size: 12px; color: #57606a;");
   panel.appendChild(help);
 
@@ -885,7 +1179,7 @@ function openConfigModal(repoCtx: { org: string; repo: string } | null): void {
   panel.appendChild(baseUrlInput);
 
   const dashboardsHeading = document.createElement("div");
-  dashboardsHeading.textContent = "Dashboards";
+  dashboardsHeading.textContent = "Jump targets";
   dashboardsHeading.setAttribute("style", "font-size: 12px; font-weight: 600; margin-bottom: 8px;");
   panel.appendChild(dashboardsHeading);
 
@@ -918,9 +1212,20 @@ function openConfigModal(repoCtx: { org: string; repo: string } | null): void {
     parent.appendChild(wrapper);
   };
 
+  const VAR_FIELDS: Array<[ContextFieldKey, string]> = [
+    ["repo", "Repo name"],
+    ["branch", "Branch"],
+    ["prNumber", "PR number"],
+    ["workflowName", "Workflow file"],
+    ["runnerName", "Runner"],
+    ["runnerGroupName", "Runner group"],
+    ["runId", "Workflow run ID"],
+    ["jobId", "Job ID"],
+  ];
+
   const renderRows = (): void => {
     rowsContainer.innerHTML = "";
-    draft.dashboards.forEach((dashboard, index) => {
+    draft.dashboards.forEach((target, index) => {
       const row = document.createElement("div");
       row.setAttribute(
         "style",
@@ -941,36 +1246,80 @@ function openConfigModal(repoCtx: { org: string; repo: string } | null): void {
       });
       row.appendChild(removeButton);
 
-      textField(row, "Display name", dashboard.name, (value) => {
-        dashboard.name = value;
+      const typeLabel = document.createElement("label");
+      typeLabel.textContent = "Target type";
+      typeLabel.setAttribute("style", "display: block; font-size: 11px; color: #57606a; margin-bottom: 2px;");
+      row.appendChild(typeLabel);
+
+      const typeSelect = document.createElement("select");
+      typeSelect.setAttribute(
+        "style",
+        "display: block; width: 100%; box-sizing: border-box; padding: 4px 6px; " +
+          "margin-bottom: 6px; font-size: 12px; border: 1px solid #d0d7de; border-radius: 4px; " +
+          "background: #fff; color: #24292f;",
+      );
+      for (const [value, optionLabel] of [
+        ["dashboard", "Grafana dashboard"],
+        ["trace", "Tempo trace search"],
+      ] as const) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = optionLabel;
+        option.selected = target.type === value;
+        typeSelect.appendChild(option);
+      }
+      typeSelect.addEventListener("change", () => {
+        const name = draft.dashboards[index].name;
+        draft.dashboards[index] =
+          typeSelect.value === "trace"
+            ? { type: "trace", name, id: "", datasourceUid: "", query: "" }
+            : { type: "dashboard", name, uid: "", slug: "", varNames: {} };
+        renderRows();
       });
-      textField(row, "Dashboard UID", dashboard.uid, (value) => {
-        dashboard.uid = value.trim();
-      });
-      textField(row, "Dashboard slug", dashboard.slug, (value) => {
-        dashboard.slug = value.trim();
+      row.appendChild(typeSelect);
+
+      textField(row, "Display name", target.name, (value) => {
+        target.name = value;
       });
 
-      const varsHeading = document.createElement("div");
-      varsHeading.textContent = "Template variable names (leave blank if not used)";
-      varsHeading.setAttribute("style", "font-size: 11px; color: #57606a; margin: 8px 0 4px;");
-      row.appendChild(varsHeading);
-
-      const varFields: Array<[keyof DashboardVarNames, string]> = [
-        ["branch", "Branch"],
-        ["prNumber", "PR number"],
-        ["workflowName", "Workflow file"],
-        ["runnerName", "Runner"],
-      ];
-      for (const [key, label] of varFields) {
-        textField(row, label, dashboard.varNames[key] ?? "", (value) => {
-          const trimmed = value.trim();
-          if (trimmed === "") {
-            delete dashboard.varNames[key];
-          } else {
-            dashboard.varNames[key] = trimmed;
-          }
+      if (target.type === "trace") {
+        textField(row, "Target ID (unique among your traces; only used to dedupe on export)", target.id, (value) => {
+          target.id = value.trim();
         });
+        textField(row, "Tempo datasource UID", target.datasourceUid, (value) => {
+          target.datasourceUid = value.trim();
+        });
+        textField(
+          row,
+          "TraceQL query (use {{fieldKey}} placeholders, e.g. {{runId}})",
+          target.query,
+          (value) => {
+            target.query = value;
+          },
+        );
+      } else {
+        textField(row, "Dashboard UID", target.uid, (value) => {
+          target.uid = value.trim();
+        });
+        textField(row, "Dashboard slug", target.slug, (value) => {
+          target.slug = value.trim();
+        });
+
+        const varsHeading = document.createElement("div");
+        varsHeading.textContent = "Template variable names (leave blank if not used)";
+        varsHeading.setAttribute("style", "font-size: 11px; color: #57606a; margin: 8px 0 4px;");
+        row.appendChild(varsHeading);
+
+        for (const [key, label] of VAR_FIELDS) {
+          textField(row, label, target.varNames[key] ?? "", (value) => {
+            const trimmed = value.trim();
+            if (trimmed === "") {
+              delete target.varNames[key];
+            } else {
+              target.varNames[key] = trimmed;
+            }
+          });
+        }
       }
 
       rowsContainer.appendChild(row);
@@ -980,7 +1329,7 @@ function openConfigModal(repoCtx: { org: string; repo: string } | null): void {
 
   const addButton = document.createElement("button");
   addButton.type = "button";
-  addButton.textContent = "+ Add dashboard";
+  addButton.textContent = "+ Add jump target";
   addButton.setAttribute(
     "style",
     "display: block; width: 100%; padding: 8px; margin-bottom: 16px; " +
@@ -988,7 +1337,7 @@ function openConfigModal(repoCtx: { org: string; repo: string } | null): void {
       "font-size: 12px; cursor: pointer;",
   );
   addButton.addEventListener("click", () => {
-    draft.dashboards.push({ name: "", uid: "", slug: "", varNames: {} });
+    draft.dashboards.push({ type: "dashboard", name: "", uid: "", slug: "", varNames: {} });
     renderRows();
   });
   panel.appendChild(addButton);
@@ -1108,7 +1457,7 @@ function renderJumpButton(context: JumpContext | null): void {
     const setupButton = document.createElement("button");
     setupButton.type = "button";
     setupButton.textContent = isConfigured(currentConfig)
-      ? "⚙️ No dashboard configured for this page"
+      ? "⚙️ No jump target configured for this page"
       : "⚙️ Set up Grafana jump";
     setupButton.setAttribute("style", SOLO_BUTTON_STYLE);
     setupButton.addEventListener("click", (event) => {
@@ -1124,7 +1473,8 @@ function renderJumpButton(context: JumpContext | null): void {
     jumpLink.setAttribute("href", buildJumpUrl(primary.baseUrl, primary.dashboard, context));
     jumpLink.setAttribute("target", "_blank");
     jumpLink.setAttribute("style", BUTTON_STYLE);
-    jumpLink.textContent = active.length > 1 ? `${label} (${primary.dashboard.name}) ↗️` : `${label} ↗️`;
+    jumpLink.textContent =
+      active.length > 1 ? `${label} (${targetDisplayName(primary.dashboard)}) ↗️` : `${label} ↗️`;
     container.appendChild(jumpLink);
 
     const toggle = document.createElement("button");
@@ -1135,10 +1485,10 @@ function renderJumpButton(context: JumpContext | null): void {
       event.stopPropagation();
       const items = [
         ...active.map(({ baseUrl, dashboard }) => ({
-          label: `↗️ ${dashboard.name || dashboard.uid}`,
+          label: `↗️ ${targetDisplayName(dashboard)}`,
           onClick: () => window.open(buildJumpUrl(baseUrl, dashboard, context), "_blank"),
         })),
-        { label: "⚙️ Edit dashboards...", onClick: () => openConfigModal(repoContextForJump(context)) },
+        { label: "⚙️ Edit jump targets...", onClick: () => openConfigModal(repoContextForJump(context)) },
       ];
       openMenu(container, items);
     });
@@ -1209,16 +1559,20 @@ if (typeof module !== "undefined" && module.exports) {
     parsePrContext,
     parseBranchContext,
     parseRunnerContext,
+    parseRunnerGroupContext,
     parseWorkflowContext,
+    parseRunContext,
     resolveJumpContext,
     extractBranchFromQuery,
-    contextVarKey,
-    contextFilterValue,
+    contextFields,
+    requiredFields,
     applicableDashboards,
     repoContextForJump,
     activeDashboards,
     mergeConfigsForExport,
     buildDashboardUrl,
+    renderTemplate,
+    buildTraceExploreUrl,
     buildJumpUrl,
     labelForContext,
     defaultConfig,

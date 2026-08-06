@@ -1,7 +1,7 @@
 # Config for the "GitHub Actions => Grafana jump button" userscript
 # (packages/github-actions-grafana-jump). Gives every contributor to this
-# repo the same dashboards without each of them configuring the userscript by
-# hand. A contributor's own personal config (set via the userscript's own
+# repo the same jump targets without each of them configuring the userscript
+# by hand. A contributor's own personal config (set via the userscript's own
 # "Set up Grafana jump" panel) always takes priority over this file for any
 # page it covers - this is only a fallback for pages nobody has personally
 # configured. Bootstrap one of these for your own repo via the userscript's
@@ -12,21 +12,66 @@
 # file format the userscript reads.
 #
 # baseUrl: your Grafana instance's base URL (no trailing slash).
-# dashboards: one entry per dashboard you want jumpable to. For each:
-#   name     - display label for the jump button/menu.
-#   uid      - the dashboard's UID (Grafana dashboard settings -> JSON Model,
-#              or the segment right after /d/ in the dashboard's URL).
-#   slug     - the URL slug right after the uid in the dashboard's URL.
-#   varNames - which of this dashboard's template variables (if any) to
-#              preset from the current GitHub page. Leave a field out if the
-#              dashboard doesn't use that kind of filter.
+# dashboards: one entry per jump target. Each entry is either a Grafana
+#   dashboard link (type: dashboard) or a Tempo trace search (type: trace). A
+#   target only shows up as a jump target on pages that provide every field
+#   it's configured to use - not all fields are available on every page (a
+#   branch's Actions page has no workflow run ID, for example), so different
+#   targets naturally show up on different pages.
+#
+#   type: dashboard
+#     name     - display label for the jump button/menu.
+#     uid      - the dashboard's UID (Grafana dashboard settings -> JSON
+#                Model, or the segment right after /d/ in the dashboard's
+#                URL).
+#     slug     - the URL slug right after the uid in the dashboard's URL.
+#     varNames - which of this dashboard's template variables (if any) to
+#                preset from the current GitHub page. Leave a field out if
+#                the dashboard doesn't use that kind of filter. Available
+#                fields: repo, branch, prNumber, workflowName, runnerName,
+#                runnerGroupName, runId, jobId.
+#
+#   type: trace
+#     name          - display label for the jump button/menu.
+#     id            - any string unique among your trace targets; used only
+#                      to dedupe when exporting/merging this file, not shown
+#                      anywhere.
+#     datasourceUid - the Tempo datasource's UID in Grafana (Connections ->
+#                     Data sources -> your Tempo source -> the "uid" in its
+#                     URL or Settings JSON).
+#     query         - a TraceQL query with `{{fieldKey}}` placeholders (the
+#                     same field names as varNames above) filled in from the
+#                     current GitHub page - adjust the attribute names below
+#                     (e.g. resource.github.run_id) to match however your own
+#                     traces are tagged.
 baseUrl: https://grafana.example.com
 dashboards:
-  - name: CI Overview
+  - type: dashboard
+    name: Workflow runs for this repo
     uid: ci-overview-uid
     slug: ci-overview
     varNames:
-      branch: branch
-      prNumber: pr_number
-      workflowName: workflow_file
+      repo: repository
+  - type: dashboard
+    name: Workflow runs on this runner
+    uid: ci-overview-uid
+    slug: ci-overview
+    varNames:
       runnerName: runner_name
+  - type: dashboard
+    name: Workflow runs for this branch
+    uid: ci-overview-uid
+    slug: ci-overview
+    varNames:
+      repo: repository
+      branch: branch
+  - type: trace
+    name: Trace for this workflow run
+    id: workflow-run-trace
+    datasourceUid: tempo-datasource-uid
+    query: '{resource.github.run_id="{{runId}}"}'
+  - type: trace
+    name: Span for this job
+    id: workflow-job-span
+    datasourceUid: tempo-datasource-uid
+    query: '{resource.github.run_id="{{runId}}" && resource.github.job_id="{{jobId}}"}'
