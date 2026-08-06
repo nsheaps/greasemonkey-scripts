@@ -19,12 +19,18 @@ const {
   contextVarKey,
   contextFilterValue,
   applicableDashboards,
+  repoContextForJump,
+  activeDashboards,
+  mergeConfigsForExport,
   buildDashboardUrl,
   buildJumpUrl,
   labelForContext,
   defaultConfig,
   normalizeConfig,
   isConfigured,
+  parseYamlLite,
+  configToYamlLite,
+  buildCreateFileUrl,
 } = require("../dist/index.js");
 
 test("parsePrContext matches the PR checks tab and other PR sub-tabs", () => {
@@ -86,6 +92,7 @@ test("parseRunnerContext matches repo-scoped and org-scoped runner pages", () =>
     kind: "runner",
     scope: "repo",
     org: "oura",
+    repo: "some-repo",
     runnerId: "17",
   });
   assert.deepEqual(
@@ -317,5 +324,162 @@ test("labelForContext produces a distinct human-readable label per context kind"
   assert.equal(
     labelForContext({ kind: "runner", scope: "org", org: "oura", runnerId: "9" }),
     "Grafana: runner 9",
+  );
+});
+
+test("repoContextForJump extracts {org, repo} for repo-scoped contexts", () => {
+  assert.deepEqual(repoContextForJump({ kind: "pr", org: "o", repo: "r", prNumber: "1" }), {
+    org: "o",
+    repo: "r",
+  });
+  assert.deepEqual(
+    repoContextForJump({ kind: "branch", org: "o", repo: "r", branch: "main" }),
+    { org: "o", repo: "r" },
+  );
+  assert.deepEqual(
+    repoContextForJump({ kind: "workflow", org: "o", repo: "r", workflowFile: "ci.yml" }),
+    { org: "o", repo: "r" },
+  );
+  assert.deepEqual(
+    repoContextForJump({ kind: "runner", scope: "repo", org: "o", repo: "r", runnerId: "9" }),
+    { org: "o", repo: "r" },
+  );
+});
+
+test("repoContextForJump returns null for an org-scoped runner context", () => {
+  assert.equal(
+    repoContextForJump({ kind: "runner", scope: "org", org: "o", runnerId: "9" }),
+    null,
+  );
+});
+
+test("activeDashboards prefers the personal config outright when it has anything applicable", () => {
+  const personal = {
+    baseUrl: "https://personal.example.com",
+    dashboards: [{ name: "mine", uid: "p1", slug: "mine", varNames: { branch: "br" } }],
+  };
+  const repo = {
+    baseUrl: "https://repo.example.com",
+    dashboards: [{ name: "theirs", uid: "r1", slug: "theirs", varNames: { branch: "br" } }],
+  };
+  const context = { kind: "branch", org: "o", repo: "r", branch: "main" };
+  assert.deepEqual(activeDashboards(personal, repo, context), [
+    { baseUrl: "https://personal.example.com", dashboard: personal.dashboards[0] },
+  ]);
+});
+
+test("activeDashboards falls back to the repo config when personal has nothing applicable", () => {
+  const personal = { baseUrl: "https://personal.example.com", dashboards: [] };
+  const repo = {
+    baseUrl: "https://repo.example.com",
+    dashboards: [{ name: "theirs", uid: "r1", slug: "theirs", varNames: { branch: "br" } }],
+  };
+  const context = { kind: "branch", org: "o", repo: "r", branch: "main" };
+  assert.deepEqual(activeDashboards(personal, repo, context), [
+    { baseUrl: "https://repo.example.com", dashboard: repo.dashboards[0] },
+  ]);
+});
+
+test("activeDashboards returns nothing when neither config nor a null repo config has anything applicable", () => {
+  const personal = { baseUrl: "", dashboards: [] };
+  const context = { kind: "branch", org: "o", repo: "r", branch: "main" };
+  assert.deepEqual(activeDashboards(personal, null, context), []);
+});
+
+test("mergeConfigsForExport unions dashboards, deduped by uid, preferring the repo's copy", () => {
+  const repo = {
+    baseUrl: "https://repo.example.com",
+    dashboards: [
+      { name: "repo-only", uid: "r1", slug: "repo-only", varNames: { branch: "br" } },
+      { name: "shared (repo version)", uid: "shared", slug: "shared", varNames: {} },
+    ],
+  };
+  const personal = {
+    baseUrl: "https://personal.example.com",
+    dashboards: [
+      { name: "personal-only", uid: "p1", slug: "personal-only", varNames: {} },
+      { name: "shared (personal version)", uid: "shared", slug: "shared", varNames: { prNumber: "pr" } },
+    ],
+  };
+  assert.deepEqual(mergeConfigsForExport(repo, personal), {
+    baseUrl: "https://repo.example.com",
+    dashboards: [repo.dashboards[0], repo.dashboards[1], personal.dashboards[0]],
+  });
+});
+
+test("mergeConfigsForExport falls back to the personal baseUrl when there is no repo config", () => {
+  const personal = {
+    baseUrl: "https://personal.example.com",
+    dashboards: [{ name: "mine", uid: "p1", slug: "mine", varNames: {} }],
+  };
+  assert.deepEqual(mergeConfigsForExport(null, personal), {
+    baseUrl: "https://personal.example.com",
+    dashboards: personal.dashboards,
+  });
+});
+
+test("parseYamlLite reads a baseUrl and a sequence of dashboard mappings with nested varNames", () => {
+  const text = [
+    "# a leading comment, and a blank line below",
+    "",
+    "baseUrl: https://grafana.example.com",
+    "dashboards:",
+    "  - name: CI Overview",
+    "    uid: abc123",
+    "    slug: ci-overview",
+    "    varNames:",
+    "      branch: branch",
+    "      prNumber: pr_number",
+  ].join("\n");
+
+  assert.deepEqual(parseYamlLite(text), {
+    baseUrl: "https://grafana.example.com",
+    dashboards: [
+      {
+        name: "CI Overview",
+        uid: "abc123",
+        slug: "ci-overview",
+        varNames: { branch: "branch", prNumber: "pr_number" },
+      },
+    ],
+  });
+});
+
+test("parseYamlLite unquotes single- and double-quoted scalars", () => {
+  const text = ['name: "quoted value"', "slug: 'also quoted'"].join("\n");
+  assert.deepEqual(parseYamlLite(text), { name: "quoted value", slug: "also quoted" });
+});
+
+test("parseYamlLite round-trips through configToYamlLite for a config with multiple dashboards", () => {
+  const config = {
+    baseUrl: "https://grafana.example.com",
+    dashboards: [
+      {
+        name: "CI Overview",
+        uid: "abc123",
+        slug: "ci-overview",
+        varNames: { branch: "branch", prNumber: "pr_number" },
+      },
+      { name: "No vars", uid: "def456", slug: "no-vars", varNames: {} },
+    ],
+  };
+  assert.deepEqual(normalizeConfig(parseYamlLite(configToYamlLite(config))), config);
+});
+
+test("configToYamlLite quotes scalars that would otherwise be misread", () => {
+  const config = {
+    baseUrl: "https://grafana.example.com",
+    dashboards: [{ name: "- looks like a list item", uid: "u1", slug: "s1", varNames: {} }],
+  };
+  const yaml = configToYamlLite(config);
+  assert.match(yaml, /name: "- looks like a list item"/);
+  assert.deepEqual(normalizeConfig(parseYamlLite(yaml)), config);
+});
+
+test("buildCreateFileUrl builds a GitHub create-file link with filename and value query params", () => {
+  const url = buildCreateFileUrl("o", "r", "main", ".github/jump-links.config.yaml", "baseUrl: https://g.example.com\n");
+  assert.equal(
+    url,
+    "https://github.com/o/r/new/main?filename=.github%2Fjump-links.config.yaml&value=baseUrl%3A+https%3A%2F%2Fg.example.com%0A",
   );
 });

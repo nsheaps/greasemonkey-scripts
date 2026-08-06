@@ -1,0 +1,32 @@
+# Config for the "GitHub Actions => Grafana jump button" userscript
+# (packages/github-actions-grafana-jump). Gives every contributor to this
+# repo the same dashboards without each of them configuring the userscript by
+# hand. A contributor's own personal config (set via the userscript's own
+# "Set up Grafana jump" panel) always takes priority over this file for any
+# page it covers - this is only a fallback for pages nobody has personally
+# configured. Bootstrap one of these for your own repo via the userscript's
+# config panel -> "Create repo config template" / "Export my config to repo".
+#
+# This repo doesn't actually run a Grafana instance - the values below are
+# illustrative placeholders, kept here purely to document and exercise the
+# file format the userscript reads.
+#
+# baseUrl: your Grafana instance's base URL (no trailing slash).
+# dashboards: one entry per dashboard you want jumpable to. For each:
+#   name     - display label for the jump button/menu.
+#   uid      - the dashboard's UID (Grafana dashboard settings -> JSON Model,
+#              or the segment right after /d/ in the dashboard's URL).
+#   slug     - the URL slug right after the uid in the dashboard's URL.
+#   varNames - which of this dashboard's template variables (if any) to
+#              preset from the current GitHub page. Leave a field out if the
+#              dashboard doesn't use that kind of filter.
+baseUrl: https://grafana.example.com
+dashboards:
+  - name: CI Overview
+    uid: ci-overview-uid
+    slug: ci-overview
+    varNames:
+      branch: branch
+      prNumber: pr_number
+      workflowName: workflow_file
+      runnerName: runner_name
