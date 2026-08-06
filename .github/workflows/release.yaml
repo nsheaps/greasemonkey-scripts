@@ -17,12 +17,19 @@ name: Release
 # lint/format commit that would trigger another bump.
 #
 # A second commit, stacked on top of the bump commit but never merged into
-# main, adds the built .user.js files to git. GreasyFork's webhook-triggered
-# sync does `git show <ref>:<path>` against the real repository - it cannot
-# see files that only exist as GitHub Release binary assets. Tagging that
-# second commit (as the release tag, and as the floating `latest` tag) gives
-# GreasyFork a git ref it can read the built file from, without ever putting
-# build artifacts in main's history.
+# main, adds the built .user.js files to git. GreasyFork's "release published"
+# webhook event resolves a sync URL of the form
+# .../releases/latest/download/<pkg>.user.js to a *repo-root-relative* git
+# path of exactly <pkg>.user.js at the release's own tag (see
+# lib/github.rb#file_from_root_for_url in GreasyFork's source - it strips the
+# releases/.../download/ prefix and treats what's left as the whole path, so
+# packages/<pkg>/dist/ nesting is not preserved), then reads it with
+# `git show <tag>:<path>`. That's why this commit mirrors each package's
+# built file at repo root under that exact flat name, in addition to its
+# normal packages/<pkg>/dist/ location. Tagging that commit (as the release
+# tag, and as the floating `latest` tag) gives GreasyFork a git ref it can
+# read both forms from, without ever putting build artifacts in main's
+# history.
 
 on:
   push:
@@ -210,6 +217,14 @@ jobs:
               exit 1
             fi
             git add -f "$src"
+
+            # Flat root-level mirror, named to match each package's
+            # @downloadURL/@updateURL asset name - see the comment above this
+            # step for why GreasyFork's release-webhook sync needs this exact
+            # path instead of the nested packages/<pkg>/dist/ one.
+            root_copy="${pkg_name}.user.js"
+            cp "$src" "$root_copy"
+            git add -f "$root_copy"
           done
           git commit -m "chore(release): include built userscripts for GreasyFork sync [skip ci]"
           echo "dist-sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
