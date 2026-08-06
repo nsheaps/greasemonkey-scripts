@@ -1,6 +1,6 @@
 {
   "name": "GitHub Actions => Grafana jump button",
-  "description": "Add a button on github.com Actions pages (PR checks, branch-filtered runs, a single workflow's runs, and runner detail pages) that jumps to a matching Grafana drill-down dashboard you configure yourself",
+  "description": "Add a button on github.com Actions pages (PR checks, branch-filtered runs, a single workflow's runs, and runner detail pages) that jumps to a matching Grafana dashboard, Tempo trace, or any other URL you configure yourself",
   "author": "Nathan Heaps",
   "namespace": "https://www.github.com",
   "match": ["http*://www.github.com/*", "http*://github.com/*"],
@@ -9,6 +9,6 @@
   "grant": ["GM.setValue", "GM.getValue", "GM.xmlHttpRequest"],
   "connect": ["raw.githubusercontent.com", "api.github.com"],
   "license": "MIT",
-  "downloadURL": "https://github.com/nsheaps/greasemonkey-scripts/releases/latest/download/github-actions-grafana-jump.user.js",
-  "updateURL": "https://github.com/nsheaps/greasemonkey-scripts/releases/latest/download/github-actions-grafana-jump.user.js"
+  "downloadURL": "https://raw.githubusercontent.com/nsheaps/greasemonkey-scripts/latest/packages/github-actions-grafana-jump/dist/script.user.js",
+  "updateURL": "https://raw.githubusercontent.com/nsheaps/greasemonkey-scripts/latest/packages/github-actions-grafana-jump/dist/script.user.js"
 }

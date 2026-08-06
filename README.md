@@ -55,9 +55,10 @@ This repository uses a monorepo structure with the following setup:
 - A patch bump is applied to each package whose files changed since the last
   release. Bumping a version by hand in a PR (e.g. for a minor or major
   release) is respected and not bumped again on top.
-- Each release run publishes one GitHub Release carrying every bumped script's
-  compiled `<package-name>.user.js` as an asset. Published scripts point their
-  `@downloadURL`/`@updateURL` at that release's stable `latest/download` URL,
+- Each release run also commits every published package's built
+  `dist/script.user.js`, tags it, and moves a floating `latest` tag onto that
+  commit. Published scripts point their `@downloadURL`/`@updateURL` at
+  `https://raw.githubusercontent.com/nsheaps/greasemonkey-scripts/latest/packages/<package-name>/dist/script.user.js`,
   so a userscript manager installed directly from GitHub auto-updates from
   there. [GreasyFork](https://greasyfork.org/en/scripts?by=1372068) forcibly
   rewrites those same fields for any script actually listed on its site, so

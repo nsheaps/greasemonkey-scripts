@@ -5,13 +5,16 @@
 // Fully generic: no Grafana instance, dashboard UID, or template-variable name is
 // baked in. On first use (or whenever nothing configured applies to the current
 // page) the jump button opens an in-page configuration panel where you enter your
-// own Grafana base URL and one or more jump targets - either a dashboard, or a
-// Tempo trace search - each declaring which page-provided fields it filters or
-// templates by (branch, PR number, workflow file, runner, runner group, workflow
-// run ID, job ID). A target only shows up on pages that actually provide every
-// field it references. Once configured, the button jumps straight to the best
-// match, with a small "▾" menu to pick among multiple applicable targets or to
-// reopen the config panel. Config is persisted via GM.setValue/GM.getValue,
+// own Grafana base URL and one or more jump targets - a dashboard, a Tempo trace
+// search, or a generic link to any URL - each declaring which page-provided
+// fields it filters or templates by (repo, org, branch, PR number, workflow
+// file, runner, runner group, workflow run ID, job ID, and more - see
+// ContextFieldKey below). A target only shows up on pages that actually provide
+// every field it references. Once configured, the button jumps straight to the
+// best match, with a small "▾" menu to pick among multiple applicable targets or
+// to reopen the config panel. Shows inline alongside GitHub's own toolbar
+// buttons where possible (PR pages), else as a floating button - see the "DOM
+// injection" section below. Config is persisted via GM.setValue/GM.getValue,
 // scoped to this script.
 //
 // The `var-<name>=<value>` query-param convention used to preset a Grafana
@@ -29,6 +32,8 @@
 
 interface DashboardVarNames {
   repo?: string;
+  org?: string;
+  repoFullName?: string;
   branch?: string;
   prNumber?: string;
   workflowName?: string;
@@ -36,13 +41,26 @@ interface DashboardVarNames {
   runnerGroupName?: string;
   runId?: string;
   jobId?: string;
+  serverUrl?: string;
+  apiUrl?: string;
 }
 
-/** The fixed set of page-provided fields a jump target can filter/template by. */
+/**
+ * The fixed set of page-provided fields a jump target can filter/template by.
+ * Named and scoped after GitHub Actions' own `github` context object (e.g.
+ * `github.repository`, `github.repository_owner`, `github.server_url`,
+ * `github.api_url`) as far as a value is actually derivable from a GitHub web
+ * page's URL alone - fields that context exposes but a page URL doesn't
+ * (`github.sha`, `github.actor`, `github.event_name`, ...) are deliberately
+ * left out rather than populated with a guess, so a target referencing one
+ * would just never show as applicable instead of showing with a wrong value.
+ */
 type ContextFieldKey = keyof DashboardVarNames;
 
 const CONTEXT_FIELD_KEYS: readonly ContextFieldKey[] = [
   "repo",
+  "org",
+  "repoFullName",
   "branch",
   "prNumber",
   "workflowName",
@@ -50,6 +68,8 @@ const CONTEXT_FIELD_KEYS: readonly ContextFieldKey[] = [
   "runnerGroupName",
   "runId",
   "jobId",
+  "serverUrl",
+  "apiUrl",
 ];
 
 function isContextFieldKey(key: string): key is ContextFieldKey {
@@ -90,7 +110,23 @@ interface TraceTarget {
   query: string;
 }
 
-type JumpTargetConfig = DashboardTarget | TraceTarget;
+/**
+ * A jump target that links to any URL, not just a Grafana one - `urlTemplate`
+ * is a full URL with `{{fieldKey}}` placeholders (any ContextFieldKey)
+ * substituted from the current page, the same way a TraceTarget's query is
+ * templated - see renderTemplate(). Unlike DashboardTarget/TraceTarget, this
+ * ignores the config's baseUrl entirely: the template already is the whole
+ * URL, not something relative to a Grafana instance.
+ */
+interface LinkTarget {
+  type: "link";
+  name: string;
+  // A user-chosen stable identifier, same role as TraceTarget.id.
+  id: string;
+  urlTemplate: string;
+}
+
+type JumpTargetConfig = DashboardTarget | TraceTarget | LinkTarget;
 
 interface GrafanaJumpConfig {
   baseUrl: string;
@@ -116,10 +152,11 @@ function normalizeVarNames(raw: unknown): DashboardVarNames {
 /**
  * Reshapes one raw dashboards[] entry into a well-formed JumpTargetConfig, or
  * null if it's malformed enough that it can never be jumped to (no uid for a
- * dashboard, or a missing id/datasourceUid/query for a trace search) - callers
- * drop nulls rather than keeping a target that would only ever produce a
- * broken link. Anything without `type: "trace"` is treated as a dashboard,
- * which also covers the format's original shape (no `type` field at all).
+ * dashboard, or a missing id/datasourceUid/query for a trace search, or a
+ * missing id/urlTemplate for a link) - callers drop nulls rather than keeping
+ * a target that would only ever produce a broken link. Anything without
+ * `type: "trace"` or `type: "link"` is treated as a dashboard, which also
+ * covers the format's original shape (no `type` field at all).
  */
 function normalizeTarget(raw: Record<string, unknown>): JumpTargetConfig | null {
   const name = typeof raw.name === "string" ? raw.name.trim() : "";
@@ -134,6 +171,14 @@ function normalizeTarget(raw: Record<string, unknown>): JumpTargetConfig | null 
     const query = typeof raw.query === "string" ? raw.query.replace(/\s*\n\s*/g, " ").trim() : "";
     if (id === "" || datasourceUid === "" || query === "") return null;
     return { type: "trace", name, id, datasourceUid, query };
+  }
+
+  if (raw.type === "link") {
+    const id = typeof raw.id === "string" ? raw.id.trim() : "";
+    const urlTemplate =
+      typeof raw.urlTemplate === "string" ? raw.urlTemplate.replace(/\s*\n\s*/g, " ").trim() : "";
+    if (id === "" || urlTemplate === "") return null;
+    return { type: "link", name, id, urlTemplate };
   }
 
   const uid = typeof raw.uid === "string" ? raw.uid.trim() : "";
@@ -352,55 +397,82 @@ function resolveJumpContext(pathname: string, search: string): JumpContext | nul
 }
 
 /**
+ * The GitHub web UI's own origin and API origin - always present regardless
+ * of context, the same way `github.server_url`/`github.api_url` are always
+ * present in a GitHub Actions workflow's `github` context. Not derived from
+ * the page at all (github.com's web UI has no non-github.com origin to
+ * derive), but exposed as fields anyway so a link/trace template can build a
+ * fully-qualified URL back into GitHub or its API without hardcoding either.
+ */
+const GITHUB_SERVER_URL = "https://github.com";
+const GITHUB_API_URL = "https://api.github.com";
+
+/**
  * All page-provided fields available for a given context, keyed the same way
- * as DashboardVarNames / a trace query's `{{placeholders}}`. Only the fields
- * the current page actually carries are present - a jump target only shows
- * up when every field it references (see requiredFields()) is one of these.
- * `repo` is included for every context scoped to a single repo (everything
- * except the org-scoped runner and runnerGroup pages), not just
- * workflow/branch contexts, so a target that only cares about the repo name
- * can show up anywhere within that repo.
+ * as DashboardVarNames / a trace query's or link's `{{placeholders}}`. Only
+ * the fields the current page actually carries are present - a jump target
+ * only shows up when every field it references (see requiredFields()) is one
+ * of these. `repo`/`org`/`repoFullName` are included for every context scoped
+ * to a single repo (everything except the org-scoped runner and runnerGroup
+ * pages), not just workflow/branch contexts, so a target that only cares
+ * about the repo name can show up anywhere within that repo. `serverUrl`/
+ * `apiUrl` are always present (see above) since every context is on
+ * github.com.
  */
 function contextFields(context: JumpContext): Partial<Record<ContextFieldKey, string>> {
+  const common = { serverUrl: GITHUB_SERVER_URL, apiUrl: GITHUB_API_URL };
+  const repoFields = (repo: string) => ({
+    repo,
+    org: context.org,
+    repoFullName: `${context.org}/${repo}`,
+  });
+
   switch (context.kind) {
     case "pr":
-      return { repo: context.repo, prNumber: context.prNumber };
+      return { ...common, ...repoFields(context.repo), prNumber: context.prNumber };
     case "branch":
-      return { repo: context.repo, branch: context.branch };
+      return { ...common, ...repoFields(context.repo), branch: context.branch };
     case "workflow":
-      return { repo: context.repo, workflowName: context.workflowFile };
+      return { ...common, ...repoFields(context.repo), workflowName: context.workflowFile };
     case "run":
       return {
-        repo: context.repo,
+        ...common,
+        ...repoFields(context.repo),
         runId: context.runId,
         ...(context.jobId ? { jobId: context.jobId } : {}),
       };
     case "runner":
       return {
-        ...(context.repo ? { repo: context.repo } : {}),
+        ...common,
+        ...(context.repo ? repoFields(context.repo) : { org: context.org }),
         runnerName: context.runnerId,
       };
     case "runnerGroup":
-      return { runnerGroupName: context.groupId };
+      return { ...common, org: context.org, runnerGroupName: context.groupId };
   }
 }
 
+/** Which ContextFieldKey `{{placeholders}}` a template string actually references. */
+function placeholderFields(template: string): ContextFieldKey[] {
+  const found = new Set<ContextFieldKey>();
+  const placeholderPattern = /\{\{(\w+)\}\}/g;
+  let match: RegExpExecArray | null;
+  while ((match = placeholderPattern.exec(template))) {
+    if (isContextFieldKey(match[1])) found.add(match[1]);
+  }
+  return [...found];
+}
+
 /**
- * Which of a target's configured fields (varNames entries for a dashboard,
- * or `{{placeholder}}` references for a trace query) it needs present on the
- * page to be jumpable. A target with none configured is treated as needing
- * something it can never match, not as universally applicable.
+ * Which of a target's configured fields (varNames entries for a dashboard, or
+ * `{{placeholder}}` references for a trace query or link URL template) it
+ * needs present on the page to be jumpable. A target with none configured is
+ * treated as needing something it can never match, not as universally
+ * applicable.
  */
 function requiredFields(target: JumpTargetConfig): ContextFieldKey[] {
-  if (target.type === "trace") {
-    const found = new Set<ContextFieldKey>();
-    const placeholderPattern = /\{\{(\w+)\}\}/g;
-    let match: RegExpExecArray | null;
-    while ((match = placeholderPattern.exec(target.query))) {
-      if (isContextFieldKey(match[1])) found.add(match[1]);
-    }
-    return [...found];
-  }
+  if (target.type === "trace") return placeholderFields(target.query);
+  if (target.type === "link") return placeholderFields(target.urlTemplate);
   return CONTEXT_FIELD_KEYS.filter((key) => Boolean(target.varNames[key]));
 }
 
@@ -475,11 +547,13 @@ function activeDashboards(
 
 /**
  * A stable identity for deduping targets on export - a dashboard's own
- * Grafana uid, or a trace target's user-chosen id (traces have no
- * Grafana-assigned uid of their own to dedupe on).
+ * Grafana uid, or a trace/link target's user-chosen id (traces and links have
+ * no Grafana-assigned uid of their own to dedupe on).
  */
 function targetKey(target: JumpTargetConfig): string {
-  return target.type === "trace" ? `trace:${target.id}` : `dashboard:${target.uid}`;
+  if (target.type === "trace") return `trace:${target.id}`;
+  if (target.type === "link") return `link:${target.id}`;
+  return `dashboard:${target.uid}`;
 }
 
 /**
@@ -581,16 +655,19 @@ function buildTraceExploreUrl(
 }
 
 /**
- * Builds the Grafana jump URL for one target against a resolved context - a
- * dashboard link with its own var- filters preset, or a Tempo trace search
- * with its query template filled in. Assumes the target is applicable (see
- * applicableDashboards) - callers that skip that check just get a link with
- * whichever filters/placeholders the page happens to provide, silently
+ * Builds the jump URL for one target against a resolved context - a Grafana
+ * dashboard link with its own var- filters preset, a Tempo trace search with
+ * its query template filled in, or a fully generic URL with its own template
+ * filled in (baseUrl is meaningless for a link target and ignored, since its
+ * urlTemplate is already the whole URL). Assumes the target is applicable
+ * (see applicableDashboards) - callers that skip that check just get a link
+ * with whichever filters/placeholders the page happens to provide, silently
  * omitted otherwise.
  */
 function buildJumpUrl(baseUrl: string, target: JumpTargetConfig, context: JumpContext): string {
   const fields = contextFields(context);
   if (target.type === "trace") return buildTraceExploreUrl(baseUrl, target, fields);
+  if (target.type === "link") return renderTemplate(target.urlTemplate, fields);
 
   const vars: Record<string, string> = {};
   for (const key of CONTEXT_FIELD_KEYS) {
@@ -603,7 +680,8 @@ function buildJumpUrl(baseUrl: string, target: JumpTargetConfig, context: JumpCo
 
 /** name if set, else whatever stable identifier the target has instead. */
 function targetDisplayName(target: JumpTargetConfig): string {
-  return target.name || (target.type === "trace" ? target.id : target.uid);
+  if (target.name) return target.name;
+  return target.type === "dashboard" ? target.uid : target.id;
 }
 
 /** Human-readable label for the jump button, specific to the matched context. */
@@ -809,6 +887,11 @@ function configToYamlLite(config: GrafanaJumpConfig): string {
       lines.push(`    query: ${yamlLiteScalar(target.query)}`);
       continue;
     }
+    if (target.type === "link") {
+      lines.push(`    id: ${yamlLiteScalar(target.id)}`);
+      lines.push(`    urlTemplate: ${yamlLiteScalar(target.urlTemplate)}`);
+      continue;
+    }
     lines.push(`    uid: ${yamlLiteScalar(target.uid)}`);
     lines.push(`    slug: ${yamlLiteScalar(target.slug)}`);
     const varEntries = CONTEXT_FIELD_KEYS.filter((key) => Boolean(target.varNames[key]));
@@ -843,6 +926,119 @@ async function loadConfig(): Promise<GrafanaJumpConfig> {
 
 async function saveConfig(config: GrafanaJumpConfig): Promise<void> {
   await GM.setValue(CONFIG_STORAGE_KEY, JSON.stringify(config));
+}
+
+// ---------------------------------------------------------------------------
+// Update notification. Compares the version currently running (GM.info.script
+// .version, which the user's script manager has already updated in the
+// background per @updateURL/@downloadURL by the time this runs) against the
+// version we last recorded seeing - not against "the latest available
+// version" over the network. There is nothing to poll for: if the two
+// differ, the script manager already applied an update just now, and this is
+// purely a local, no-network notice of that fact (mirroring cept's own
+// UpdateToast, which fires after a service worker update reloads the page,
+// not before one is available).
+// ---------------------------------------------------------------------------
+
+const LAST_SEEN_VERSION_KEY = "grafanaJumpLastSeenVersion.v1";
+
+const CHANGELOG_URL =
+  "https://github.com/nsheaps/greasemonkey-scripts/blob/main/packages/github-actions-grafana-jump/CHANGELOG.md";
+
+/**
+ * Whether `current` is a genuine update over `lastSeen`, not just this
+ * script's first-ever run (an empty lastSeen, nothing stored yet) or a
+ * no-op reload on the same version.
+ */
+function isVersionUpdate(lastSeen: string, current: string): boolean {
+  return lastSeen !== "" && lastSeen !== current;
+}
+
+/**
+ * Records the currently-running version as "seen", returning the previously
+ * recorded version - a toast is due iff isVersionUpdate(previous, current).
+ * Always records (even on first run) so next time has something to compare
+ * against.
+ */
+async function recordSeenVersion(current: string): Promise<string> {
+  const previous = await GM.getValue(LAST_SEEN_VERSION_KEY, "");
+  await GM.setValue(LAST_SEEN_VERSION_KEY, current);
+  return typeof previous === "string" ? previous : "";
+}
+
+const TOAST_ID = "grafanaJumpUpdateToast";
+const TOAST_AUTO_DISMISS_MS = 10_000;
+const TOAST_EXIT_MS = 300;
+
+const TOAST_BASE_STYLE =
+  "position: fixed; bottom: 1.5rem; left: 50%; z-index: 2147483647; display: flex; " +
+  "align-items: center; gap: 0.75rem; padding: 0.75rem 1.25rem; border-radius: 0.5rem; " +
+  "background: #1a1a2e; color: #e0e0e0; font-size: 0.875rem; " +
+  "font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; " +
+  "box-shadow: 0 4px 12px rgba(0,0,0,0.3); pointer-events: auto; " +
+  "transition: opacity 0.3s ease, transform 0.3s ease;";
+const TOAST_HIDDEN_STYLE = `${TOAST_BASE_STYLE} opacity: 0; transform: translateX(-50%) translateY(1rem);`;
+const TOAST_SHOWN_STYLE = `${TOAST_BASE_STYLE} opacity: 1; transform: translateX(-50%) translateY(0);`;
+
+/**
+ * Shows a toast noting the update, linking to this package's own CHANGELOG.md
+ * (generated per-release by release-it/conventional-changelog - see
+ * .release-it.js - so it's already up to date for whatever version this is
+ * without this script generating anything itself). Styled after cept's own
+ * UpdateToast component (packages/web/src/UpdateToast.tsx): a dark, centered,
+ * bottom-fixed pill that fades/slides in, then back out before removal.
+ * Auto-dismisses after 10s per the same design, but this toast has no
+ * "visible" prop to drive that from - the timer and the fade-out it triggers
+ * are both owned here instead.
+ */
+function showUpdateToast(newVersion: string): void {
+  document.getElementById(TOAST_ID)?.remove();
+
+  const toast = document.createElement("div");
+  toast.id = TOAST_ID;
+  toast.setAttribute("role", "status");
+  toast.setAttribute("aria-live", "polite");
+  toast.setAttribute("style", TOAST_HIDDEN_STYLE);
+
+  const link = document.createElement("a");
+  link.textContent = `GitHub Actions ↔ Grafana jump updated to v${newVersion} — see what's new`;
+  link.setAttribute("href", CHANGELOG_URL);
+  link.setAttribute("target", "_blank");
+  link.setAttribute("rel", "noopener noreferrer");
+  link.setAttribute("style", "color: inherit; text-decoration: underline;");
+  toast.appendChild(link);
+
+  let dismissTimer: ReturnType<typeof setTimeout> | undefined;
+  const dismiss = (): void => {
+    if (dismissTimer) clearTimeout(dismissTimer);
+    toast.setAttribute("style", TOAST_HIDDEN_STYLE);
+    setTimeout(() => toast.remove(), TOAST_EXIT_MS);
+  };
+
+  const closeButton = document.createElement("button");
+  closeButton.type = "button";
+  closeButton.textContent = "×";
+  closeButton.setAttribute("aria-label", "Dismiss notification");
+  closeButton.setAttribute(
+    "style",
+    "background: none; border: none; color: #888; cursor: pointer; font-size: 1.1rem; " +
+      "line-height: 1; padding: 0 0.25rem;",
+  );
+  closeButton.addEventListener("click", dismiss);
+  toast.appendChild(closeButton);
+
+  document.body.appendChild(toast);
+  // Deferred a frame so the transition in TOAST_SHOWN_STYLE actually
+  // animates from TOAST_HIDDEN_STYLE, rather than the browser coalescing
+  // both style writes into one and skipping straight to the end state.
+  requestAnimationFrame(() => toast.setAttribute("style", TOAST_SHOWN_STYLE));
+  dismissTimer = setTimeout(dismiss, TOAST_AUTO_DISMISS_MS);
+}
+
+async function checkForUpdate(): Promise<void> {
+  const current = GM.info.script.version;
+  const previous = await recordSeenVersion(current);
+  if (isVersionUpdate(previous, current)) showUpdateToast(current);
 }
 
 // ---------------------------------------------------------------------------
@@ -948,17 +1144,25 @@ const REPO_CONFIG_TEMPLATE = `# Config for the "GitHub Actions => Grafana jump b
 # (https://github.com/nsheaps/greasemonkey-scripts/tree/main/packages/github-actions-grafana-jump).
 # Gives every contributor to this repo the same jump targets without each of
 # them configuring the userscript by hand. A contributor's own personal
-# config (set via the userscript's own "Set up Grafana jump" panel) always
-# takes priority over this file for any page it covers - this is only a
-# fallback for pages nobody has personally configured.
+# config (set via the userscript's own "Set up links" panel) always takes
+# priority over this file for any page it covers - this is only a fallback
+# for pages nobody has personally configured.
 #
-# baseUrl: your Grafana instance's base URL (no trailing slash).
-# dashboards: one entry per jump target. Each entry is either a Grafana
-#   dashboard link (type: dashboard) or a Tempo trace search (type: trace). A
-#   target only shows up as a jump target on pages that provide every field
-#   it's configured to use - not all fields are available on every page (a
-#   branch's Actions page has no workflow run ID, for example), so different
-#   targets naturally show up on different pages.
+# baseUrl: your Grafana instance's base URL (no trailing slash). Only used by
+#   type: dashboard and type: trace entries below - a type: link entry's URL
+#   is already complete on its own.
+# dashboards: one entry per jump target. Each entry is a Grafana dashboard
+#   link (type: dashboard), a Tempo trace search (type: trace), or a link to
+#   any other URL (type: link). A target only shows up as a jump target on
+#   pages that provide every field it's configured to use - not all fields
+#   are available on every page (a branch's Actions page has no workflow run
+#   ID, for example), so different targets naturally show up on different
+#   pages.
+#
+#   Available fields (named after GitHub Actions' own \`github\` context,
+#   as far as a page's URL actually provides an equivalent value):
+#     repo, org, repoFullName (org/repo), branch, prNumber, workflowName,
+#     runnerName, runnerGroupName, runId, jobId, serverUrl, apiUrl.
 #
 #   type: dashboard
 #     name     - display label for the jump button/menu.
@@ -967,24 +1171,32 @@ const REPO_CONFIG_TEMPLATE = `# Config for the "GitHub Actions => Grafana jump b
 #                URL).
 #     slug     - the URL slug right after the uid in the dashboard's URL.
 #     varNames - which of this dashboard's template variables (if any) to
-#                preset from the current GitHub page. Leave a field out if
-#                the dashboard doesn't use that kind of filter. Available
-#                fields: repo, branch, prNumber, workflowName, runnerName,
-#                runnerGroupName, runId, jobId.
+#                preset from the current GitHub page, keyed by one of the
+#                fields above. Leave a field out if the dashboard doesn't use
+#                that kind of filter.
 #
 #   type: trace
 #     name          - display label for the jump button/menu.
-#     id            - any string unique among your trace targets; used only
-#                      to dedupe when exporting/merging this file, not shown
-#                      anywhere.
+#     id            - any string unique among your trace/link targets; used
+#                      only to dedupe when exporting/merging this file, not
+#                      shown anywhere.
 #     datasourceUid - the Tempo datasource's UID in Grafana (Connections ->
 #                     Data sources -> your Tempo source -> the "uid" in its
 #                     URL or Settings JSON).
-#     query         - a TraceQL query with \`{{fieldKey}}\` placeholders (the
-#                     same field names as varNames above) filled in from the
-#                     current GitHub page - adjust the attribute names below
-#                     (e.g. resource.github.run_id) to match however your own
+#     query         - a TraceQL query with \`{{fieldKey}}\` placeholders (any
+#                     field above) filled in from the current GitHub page -
+#                     adjust the attribute names below (e.g.
+#                     resource.github.run_id) to match however your own
 #                     traces are tagged.
+#
+#   type: link
+#     name        - display label for the jump button/menu.
+#     id          - any string unique among your trace/link targets; same
+#                    role as a trace target's id.
+#     urlTemplate - a full URL with \`{{fieldKey}}\` placeholders (any field
+#                   above) filled in from the current GitHub page - for
+#                   linking anywhere, not just Grafana (a wiki, a runbook, a
+#                   dashboard in some other tool entirely).
 baseUrl: https://grafana.example.com
 dashboards:
   - type: dashboard
@@ -1016,21 +1228,29 @@ dashboards:
     id: workflow-job-span
     datasourceUid: REPLACE_WITH_TEMPO_DATASOURCE_UID
     query: '{resource.github.run_id="{{runId}}" && resource.github.job_id="{{jobId}}"}'
+  - type: link
+    name: Runbook for this repo
+    id: repo-runbook
+    urlTemplate: 'https://runbooks.example.com/{{repoFullName}}'
 `;
 
 // ---------------------------------------------------------------------------
 // DOM injection.
 //
 // GitHub's Actions/PR pages are a pjax/React SPA, and (confirmed by inspecting
-// the live DOM while building this script) the header/toolbar elements are
+// the live DOM while building this script) most header/toolbar elements are
 // styled with Primer React's hashed CSS-module class names (e.g.
 // "prc-TabNav-TabNavTabList-Ave63"), which are not stable across GitHub
-// front-end deploys and unsafe to hardcode as selectors. Rather than anchor to
-// one of those per-page toolbars, this script shows a single fixed-position
-// button that appears whenever the current URL matches a supported context and
-// disappears otherwise - this only depends on `location`, not on any specific
-// GitHub toolbar DOM shape, so it degrades gracefully (no button, no navigation
-// left to fix) if GitHub reshuffles the page layout again.
+// front-end deploys and unsafe to hardcode as selectors. A PR's own header
+// toolbar is the one confirmed exception - see PR_TOOLBAR_SELECTOR below,
+// already relied on by github-to-graphite-button - so only PR pages get an
+// inline button injected directly into it (renderInlineButton()). Every other
+// supported context (branch/workflow/run/runner/runnerGroup, all on the
+// Actions tab rather than a PR) falls back to a single fixed-position button
+// that appears whenever the current URL matches a supported context and
+// disappears otherwise - this only depends on `location`, not on any GitHub
+// toolbar DOM shape, so it degrades gracefully (no button, no navigation left
+// to fix) if GitHub reshuffles that page's layout again.
 // ---------------------------------------------------------------------------
 
 const CONTAINER_ID = "grafanaJumpContainer";
@@ -1116,7 +1336,9 @@ function openConfigModal(repoCtx: { org: string; repo: string } | null): void {
   // Work on a deep-ish draft copy so Cancel leaves the saved config untouched.
   const draft: GrafanaJumpConfig = {
     baseUrl: currentConfig.baseUrl,
-    dashboards: currentConfig.dashboards.map((d) => (d.type === "trace" ? { ...d } : { ...d, varNames: { ...d.varNames } })),
+    dashboards: currentConfig.dashboards.map((d) =>
+      d.type === "dashboard" ? { ...d, varNames: { ...d.varNames } } : { ...d },
+    ),
   };
 
   const overlay = document.createElement("div");
@@ -1145,11 +1367,12 @@ function openConfigModal(repoCtx: { org: string; repo: string } | null): void {
 
   const help = document.createElement("p");
   help.textContent =
-    "Set your Grafana base URL and the jump targets to offer - a dashboard link, or a " +
-    "Tempo trace search. For a dashboard, fill in whichever template-variable names it " +
-    "uses (dashboard settings -> Variables); for a trace, write a TraceQL query using " +
-    "{{fieldKey}} placeholders. A target only shows up on a page that provides every " +
-    "field it references - leave fields blank/out of the query if a target doesn't need them.";
+    "Set your Grafana base URL and the jump targets to offer - a dashboard link, a Tempo " +
+    "trace search, or a generic link to any URL. For a dashboard, fill in whichever " +
+    "template-variable names it uses (dashboard settings -> Variables); for a trace or a " +
+    "generic link, write a query/URL using {{fieldKey}} placeholders. A target only shows " +
+    "up on a page that provides every field it references - leave fields blank/out of the " +
+    "query or URL if a target doesn't need them.";
   help.setAttribute("style", "margin: 0 0 16px; font-size: 12px; color: #57606a;");
   panel.appendChild(help);
 
@@ -1214,6 +1437,8 @@ function openConfigModal(repoCtx: { org: string; repo: string } | null): void {
 
   const VAR_FIELDS: Array<[ContextFieldKey, string]> = [
     ["repo", "Repo name"],
+    ["org", "Org/owner"],
+    ["repoFullName", "Repo full name (org/repo)"],
     ["branch", "Branch"],
     ["prNumber", "PR number"],
     ["workflowName", "Workflow file"],
@@ -1221,6 +1446,8 @@ function openConfigModal(repoCtx: { org: string; repo: string } | null): void {
     ["runnerGroupName", "Runner group"],
     ["runId", "Workflow run ID"],
     ["jobId", "Job ID"],
+    ["serverUrl", "GitHub server URL"],
+    ["apiUrl", "GitHub API URL"],
   ];
 
   const renderRows = (): void => {
@@ -1261,6 +1488,7 @@ function openConfigModal(repoCtx: { org: string; repo: string } | null): void {
       for (const [value, optionLabel] of [
         ["dashboard", "Grafana dashboard"],
         ["trace", "Tempo trace search"],
+        ["link", "Generic URL"],
       ] as const) {
         const option = document.createElement("option");
         option.value = value;
@@ -1273,7 +1501,9 @@ function openConfigModal(repoCtx: { org: string; repo: string } | null): void {
         draft.dashboards[index] =
           typeSelect.value === "trace"
             ? { type: "trace", name, id: "", datasourceUid: "", query: "" }
-            : { type: "dashboard", name, uid: "", slug: "", varNames: {} };
+            : typeSelect.value === "link"
+              ? { type: "link", name, id: "", urlTemplate: "" }
+              : { type: "dashboard", name, uid: "", slug: "", varNames: {} };
         renderRows();
       });
       row.appendChild(typeSelect);
@@ -1295,6 +1525,18 @@ function openConfigModal(repoCtx: { org: string; repo: string } | null): void {
           target.query,
           (value) => {
             target.query = value;
+          },
+        );
+      } else if (target.type === "link") {
+        textField(row, "Target ID (unique among your links; only used to dedupe on export)", target.id, (value) => {
+          target.id = value.trim();
+        });
+        textField(
+          row,
+          "URL template (use {{fieldKey}} placeholders, e.g. https://example.com/{{repo}})",
+          target.urlTemplate,
+          (value) => {
+            target.urlTemplate = value;
           },
         );
       } else {
@@ -1435,85 +1677,191 @@ function openConfigModal(repoCtx: { org: string; repo: string } | null): void {
   document.body.appendChild(overlay);
 }
 
-function renderJumpButton(context: JumpContext | null): void {
-  const existing = document.getElementById(CONTAINER_ID);
+type ButtonVariant = "floating" | "inline";
 
-  if (!context) {
-    existing?.remove();
+/**
+ * Applies this button's look for the given placement - GitHub's own Primer
+ * utility classes when sitting inline among GitHub's real toolbar buttons
+ * (the same classes github-to-graphite-button uses on the exact same
+ * gh-header-actions toolbar, so this matches GitHub's own buttons rather than
+ * standing out), or this script's own custom-colored inline style when
+ * floating free of any GitHub styling context.
+ */
+function styleJumpButton(el: HTMLElement, variant: ButtonVariant, kind: "solo" | "primary" | "toggle"): void {
+  if (variant === "inline") {
+    el.setAttribute("class", "Button--secondary Button--small Button");
     return;
   }
+  el.setAttribute("style", kind === "solo" ? SOLO_BUTTON_STYLE : kind === "toggle" ? TOGGLE_STYLE : BUTTON_STYLE);
+}
 
-  const active = activeDashboards(currentConfig, currentRepoConfig, context);
-
-  const container = existing ?? document.createElement("div");
-  container.id = CONTAINER_ID;
-  container.setAttribute(
-    "style",
-    "position: fixed; bottom: 16px; right: 16px; z-index: 2147483647;",
-  );
+/**
+ * Fills a container (the floating button's own div, or an inline wrapper
+ * dropped into GitHub's toolbar) with the jump button/menu for a context -
+ * shared between renderJumpButton() and renderInlineButton() so the two
+ * placements can't drift out of sync on click behavior, only on styling (see
+ * styleJumpButton()).
+ */
+function populateJumpContainer(
+  container: HTMLElement,
+  context: JumpContext,
+  active: ActiveDashboard[],
+  variant: ButtonVariant,
+): void {
   container.innerHTML = "";
 
   if (active.length === 0) {
     const setupButton = document.createElement("button");
     setupButton.type = "button";
-    setupButton.textContent = isConfigured(currentConfig)
-      ? "⚙️ No jump target configured for this page"
-      : "⚙️ Set up Grafana jump";
-    setupButton.setAttribute("style", SOLO_BUTTON_STYLE);
+    setupButton.textContent = "⚙️ Set up links";
+    styleJumpButton(setupButton, variant, "solo");
     setupButton.addEventListener("click", (event) => {
       event.stopPropagation();
       openConfigModal(repoContextForJump(context));
     });
     container.appendChild(setupButton);
-  } else {
-    const [primary, ...rest] = active;
-    const label = labelForContext(context);
-
-    const jumpLink = document.createElement("a");
-    jumpLink.setAttribute("href", buildJumpUrl(primary.baseUrl, primary.dashboard, context));
-    jumpLink.setAttribute("target", "_blank");
-    jumpLink.setAttribute("style", BUTTON_STYLE);
-    jumpLink.textContent =
-      active.length > 1 ? `${label} (${targetDisplayName(primary.dashboard)}) ↗️` : `${label} ↗️`;
-    container.appendChild(jumpLink);
-
-    const toggle = document.createElement("button");
-    toggle.type = "button";
-    toggle.textContent = "▾";
-    toggle.setAttribute("style", TOGGLE_STYLE);
-    toggle.addEventListener("click", (event) => {
-      event.stopPropagation();
-      const items = [
-        ...active.map(({ baseUrl, dashboard }) => ({
-          label: `↗️ ${targetDisplayName(dashboard)}`,
-          onClick: () => window.open(buildJumpUrl(baseUrl, dashboard, context), "_blank"),
-        })),
-        { label: "⚙️ Edit jump targets...", onClick: () => openConfigModal(repoContextForJump(context)) },
-      ];
-      openMenu(container, items);
-    });
-    container.appendChild(toggle);
-
-    // rest is intentionally unused beyond being included in `active` above;
-    // named for clarity when reading the destructure at a glance.
-    void rest;
+    return;
   }
 
-  if (!existing) {
+  const [primary, ...rest] = active;
+  const label = labelForContext(context);
+
+  const jumpLink = document.createElement("a");
+  jumpLink.setAttribute("href", buildJumpUrl(primary.baseUrl, primary.dashboard, context));
+  jumpLink.setAttribute("target", "_blank");
+  jumpLink.setAttribute("rel", "noopener noreferrer");
+  styleJumpButton(jumpLink, variant, "primary");
+  jumpLink.textContent =
+    active.length > 1 ? `${label} (${targetDisplayName(primary.dashboard)}) ↗️` : `${label} ↗️`;
+  container.appendChild(jumpLink);
+
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.textContent = "▾";
+  styleJumpButton(toggle, variant, "toggle");
+  toggle.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const items = [
+      ...active.map(({ baseUrl, dashboard }) => ({
+        label: `↗️ ${targetDisplayName(dashboard)}`,
+        onClick: () => window.open(buildJumpUrl(baseUrl, dashboard, context), "_blank"),
+      })),
+      { label: "⚙️ Edit jump targets...", onClick: () => openConfigModal(repoContextForJump(context)) },
+    ];
+    openMenu(container, items);
+  });
+  container.appendChild(toggle);
+
+  // rest is intentionally unused beyond being included in `active` above;
+  // named for clarity when reading the destructure at a glance.
+  void rest;
+}
+
+/**
+ * GitHub's own PR header action row - the same selector
+ * github-to-graphite-button already anchors "Graphite ↗️" to, confirmed
+ * stable there. Unlike the rest of GitHub's Actions/PR pages (see the module
+ * comment above CONTAINER_ID), a PR's header toolbar is NOT one of Primer
+ * React's hashed CSS-module classes, so it's safe to hardcode here too.
+ * Nothing equivalent is known for the other context kinds (branch/workflow/
+ * run/runner/runnerGroup all live on the Actions tab, not a PR), so those
+ * keep only the floating button below.
+ */
+const PR_TOOLBAR_SELECTOR = '[class^="gh-header-actions"]';
+const INLINE_CONTAINER_ID = "grafanaJumpInlineContainer";
+
+/**
+ * Injects the jump button/menu directly into GitHub's own PR header toolbar,
+ * alongside GitHub's real action buttons - mirroring how
+ * github-to-graphite-button/graphite-to-github-button inject theirs. Returns
+ * whether it actually placed something there; false (off a PR page, or the
+ * toolbar hasn't rendered into the DOM yet on this pass) means the caller
+ * should fall back to the floating button instead.
+ */
+function renderInlineButton(context: JumpContext, active: ActiveDashboard[]): boolean {
+  if (context.kind !== "pr") return false;
+
+  const toolbar = document.querySelector(PR_TOOLBAR_SELECTOR) as HTMLElement | null;
+  if (!toolbar) return false;
+
+  const container = document.getElementById(INLINE_CONTAINER_ID) ?? document.createElement("span");
+  const alreadyMounted = container.isConnected;
+  container.id = INLINE_CONTAINER_ID;
+  container.setAttribute("style", "position: relative; display: inline-flex; gap: 4px; margin-left: 8px;");
+
+  populateJumpContainer(container, context, active, "inline");
+
+  if (!alreadyMounted) {
+    toolbar.appendChild(container);
+  }
+  return true;
+}
+
+/**
+ * Renders the jump button for a context, inline in GitHub's own PR toolbar
+ * when possible, else as the floating fallback. Returns whether this needs
+ * retrying on a later call - true only for a PR context whose toolbar hasn't
+ * rendered into the DOM yet (GitHub mounts it asynchronously after the URL
+ * settles), so the floating button is also shown as a visible stand-in for
+ * that gap rather than nothing at all.
+ */
+function renderJumpButton(context: JumpContext | null): boolean {
+  const floating = document.getElementById(CONTAINER_ID);
+
+  if (!context) {
+    floating?.remove();
+    document.getElementById(INLINE_CONTAINER_ID)?.remove();
+    return false;
+  }
+
+  const active = activeDashboards(currentConfig, currentRepoConfig, context);
+  let toolbarPending = false;
+
+  if (context.kind === "pr") {
+    if (renderInlineButton(context, active)) {
+      // Placed inline in GitHub's own toolbar - no floating button needed too.
+      floating?.remove();
+      return false;
+    }
+    toolbarPending = true;
+  } else {
+    document.getElementById(INLINE_CONTAINER_ID)?.remove();
+  }
+
+  const container = floating ?? document.createElement("div");
+  container.id = CONTAINER_ID;
+  container.setAttribute(
+    "style",
+    "position: fixed; bottom: 16px; right: 16px; z-index: 2147483647;",
+  );
+
+  populateJumpContainer(container, context, active, "floating");
+
+  if (!floating) {
     document.body.appendChild(container);
   }
+
+  return toolbarPending;
 }
 
 let lastLocationKey: string | undefined;
+// True while the current PR page's toolbar hasn't been found yet - see
+// renderJumpButton()'s return value. Keeps checkLocation() re-rendering on
+// every subsequent DOM mutation (instead of only on a pathname/search
+// change) until the inline button lands, then falls quiet again.
+let inlineButtonPending = false;
 
 function checkLocation(force = false): void {
   const { pathname, search } = window.location;
   const locationKey = `${pathname}${search}`;
-  if (!force && locationKey === lastLocationKey) return;
+  const locationChanged = force || locationKey !== lastLocationKey;
+  if (!locationChanged && !inlineButtonPending) return;
   lastLocationKey = locationKey;
 
   const context = resolveJumpContext(pathname, search);
-  renderJumpButton(context);
+  inlineButtonPending = renderJumpButton(context);
+
+  if (!locationChanged) return;
 
   const repoCtx = context ? repoContextForJump(context) : null;
   const repoKey = repoCtx ? `${repoCtx.org}/${repoCtx.repo}` : undefined;
@@ -1542,6 +1890,8 @@ if (typeof document !== "undefined") {
     const routeChangeObserver = new MutationObserver(() => checkLocation());
     routeChangeObserver.observe(document.body, { childList: true, subtree: true });
     checkLocation();
+
+    void checkForUpdate();
   })();
 }
 
@@ -1581,5 +1931,6 @@ if (typeof module !== "undefined" && module.exports) {
     parseYamlLite,
     configToYamlLite,
     buildCreateFileUrl,
+    isVersionUpdate,
   };
 }

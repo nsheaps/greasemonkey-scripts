@@ -35,6 +35,7 @@ const {
   parseYamlLite,
   configToYamlLite,
   buildCreateFileUrl,
+  isVersionUpdate,
 } = require("../dist/index.js");
 
 test("parsePrContext matches the PR checks tab and other PR sub-tabs", () => {
@@ -188,36 +189,52 @@ test("resolveJumpContext dispatches to the right parser for each supported URL s
   assert.equal(resolveJumpContext("/oura/some-repo/issues/1", ""), null);
 });
 
+const GITHUB_COMMON_FIELDS = {
+  serverUrl: "https://github.com",
+  apiUrl: "https://api.github.com",
+};
+
 test("contextFields exposes every page-provided field per context kind", () => {
   assert.deepEqual(contextFields({ kind: "pr", org: "o", repo: "r", prNumber: "42" }), {
+    ...GITHUB_COMMON_FIELDS,
     repo: "r",
+    org: "o",
+    repoFullName: "o/r",
     prNumber: "42",
   });
   assert.deepEqual(contextFields({ kind: "branch", org: "o", repo: "r", branch: "main" }), {
+    ...GITHUB_COMMON_FIELDS,
     repo: "r",
+    org: "o",
+    repoFullName: "o/r",
     branch: "main",
   });
   assert.deepEqual(
     contextFields({ kind: "workflow", org: "o", repo: "r", workflowFile: "ci.yml" }),
-    { repo: "r", workflowName: "ci.yml" },
+    { ...GITHUB_COMMON_FIELDS, repo: "r", org: "o", repoFullName: "o/r", workflowName: "ci.yml" },
   );
   assert.deepEqual(contextFields({ kind: "run", org: "o", repo: "r", runId: "9" }), {
+    ...GITHUB_COMMON_FIELDS,
     repo: "r",
+    org: "o",
+    repoFullName: "o/r",
     runId: "9",
   });
   assert.deepEqual(
     contextFields({ kind: "run", org: "o", repo: "r", runId: "9", jobId: "1" }),
-    { repo: "r", runId: "9", jobId: "1" },
+    { ...GITHUB_COMMON_FIELDS, repo: "r", org: "o", repoFullName: "o/r", runId: "9", jobId: "1" },
   );
   assert.deepEqual(
     contextFields({ kind: "runner", scope: "repo", org: "o", repo: "r", runnerId: "5" }),
-    { repo: "r", runnerName: "5" },
+    { ...GITHUB_COMMON_FIELDS, repo: "r", org: "o", repoFullName: "o/r", runnerName: "5" },
   );
   assert.deepEqual(
     contextFields({ kind: "runner", scope: "org", org: "o", runnerId: "5" }),
-    { runnerName: "5" },
+    { ...GITHUB_COMMON_FIELDS, org: "o", runnerName: "5" },
   );
   assert.deepEqual(contextFields({ kind: "runnerGroup", org: "o", groupId: "3" }), {
+    ...GITHUB_COMMON_FIELDS,
+    org: "o",
     runnerGroupName: "3",
   });
 });
@@ -319,6 +336,39 @@ test("normalizeConfig drops a trace target missing id, datasourceUid, or query",
   }
 });
 
+test("normalizeConfig reads a link target, trimming and collapsing an embedded newline in its urlTemplate", () => {
+  const result = normalizeConfig({
+    baseUrl: "https://g.example.com",
+    dashboards: [
+      {
+        type: "link",
+        name: "  Runbook  ",
+        id: " repo-runbook ",
+        urlTemplate: "https://runbooks.example.com/{{repoFullName}}\n  ?tab=overview",
+      },
+    ],
+  });
+  assert.deepEqual(result.dashboards, [
+    {
+      type: "link",
+      name: "Runbook",
+      id: "repo-runbook",
+      urlTemplate: "https://runbooks.example.com/{{repoFullName}} ?tab=overview",
+    },
+  ]);
+});
+
+test("normalizeConfig drops a link target missing id or urlTemplate", () => {
+  const base = { type: "link", name: "x", id: "i", urlTemplate: "https://example.com/{{repo}}" };
+  for (const missing of ["id", "urlTemplate"]) {
+    const result = normalizeConfig({
+      baseUrl: "https://g.example.com",
+      dashboards: [{ ...base, [missing]: "" }],
+    });
+    assert.deepEqual(result.dashboards, [], `expected a link with no ${missing} to be dropped`);
+  }
+});
+
 test("requiredFields reads a dashboard's configured varNames entries", () => {
   assert.deepEqual(
     requiredFields({ type: "dashboard", name: "", uid: "u", slug: "s", varNames: { branch: "b", runId: "r" } }),
@@ -343,6 +393,17 @@ test("requiredFields reads a trace target's {{placeholder}} references, ignoring
   );
   assert.deepEqual(
     requiredFields({ type: "trace", name: "", id: "i", datasourceUid: "d", query: '{foo="{{notARealField}}"}' }),
+    [],
+  );
+});
+
+test("requiredFields reads a link target's {{placeholder}} references, ignoring unknown ones", () => {
+  assert.deepEqual(
+    requiredFields({ type: "link", name: "", id: "i", urlTemplate: "https://x.example.com/{{repoFullName}}" }),
+    ["repoFullName"],
+  );
+  assert.deepEqual(
+    requiredFields({ type: "link", name: "", id: "i", urlTemplate: "https://x.example.com/{{notARealField}}" }),
     [],
   );
 });
@@ -502,6 +563,22 @@ test("buildJumpUrl builds a Tempo Explore search for a trace target", () => {
   assert.equal(panes.jump.datasource, "tempo-uid");
   assert.equal(panes.jump.queries[0].queryType, "traceql");
   assert.equal(panes.jump.queries[0].query, '{resource.github.run_id="42"}');
+});
+
+test("buildJumpUrl fills in a link target's URL template, ignoring baseUrl", () => {
+  const link = {
+    type: "link",
+    name: "Runbook",
+    id: "repo-runbook",
+    urlTemplate: "https://runbooks.example.com/{{repoFullName}}",
+  };
+  const url = buildJumpUrl("https://g.example.com", link, {
+    kind: "pr",
+    org: "o",
+    repo: "r",
+    prNumber: "1",
+  });
+  assert.equal(url, "https://runbooks.example.com/o/r");
 });
 
 test("buildTraceExploreUrl fills in the query template from the given fields", () => {
@@ -703,7 +780,7 @@ test("parseYamlLite reads a single-quoted TraceQL query containing embedded doub
   assert.deepEqual(parseYamlLite(text), { query: '{resource.github.run_id="{{runId}}"}' });
 });
 
-test("parseYamlLite round-trips through configToYamlLite for a config with dashboard and trace targets", () => {
+test("parseYamlLite round-trips through configToYamlLite for a config with dashboard, trace, and link targets", () => {
   const config = {
     baseUrl: "https://grafana.example.com",
     dashboards: [
@@ -722,6 +799,12 @@ test("parseYamlLite round-trips through configToYamlLite for a config with dashb
         datasourceUid: "tempo-uid",
         query: '{resource.run_id="{{runId}}" && resource.job_id="{{jobId}}"}',
       },
+      {
+        type: "link",
+        name: "Runbook",
+        id: "repo-runbook",
+        urlTemplate: "https://runbooks.example.com/{{repoFullName}}",
+      },
     ],
   };
   assert.deepEqual(normalizeConfig(parseYamlLite(configToYamlLite(config))), config);
@@ -737,6 +820,12 @@ test("configToYamlLite quotes scalars that would otherwise be misread", () => {
   const yaml = configToYamlLite(config);
   assert.match(yaml, /name: "- looks like a list item"/);
   assert.deepEqual(normalizeConfig(parseYamlLite(yaml)), config);
+});
+
+test("isVersionUpdate is true only when a non-empty previous version differs from the current one", () => {
+  assert.equal(isVersionUpdate("0.2.3", "0.2.4"), true);
+  assert.equal(isVersionUpdate("0.2.4", "0.2.4"), false);
+  assert.equal(isVersionUpdate("", "0.2.4"), false, "empty previous means first-ever run, not an update");
 });
 
 test("buildCreateFileUrl builds a GitHub create-file link with filename and value query params", () => {
