@@ -9,6 +9,6 @@
   "grant": ["GM.setValue", "GM.getValue", "GM.xmlHttpRequest"],
   "connect": ["raw.githubusercontent.com", "api.github.com"],
   "license": "MIT",
-  "downloadURL": "https://github.com/nsheaps/greasemonkey-scripts/releases/latest/download/github-actions-grafana-jump.user.js",
-  "updateURL": "https://github.com/nsheaps/greasemonkey-scripts/releases/latest/download/github-actions-grafana-jump.user.js"
+  "downloadURL": "https://raw.githubusercontent.com/nsheaps/greasemonkey-scripts/latest/packages/github-actions-grafana-jump/dist/script.user.js",
+  "updateURL": "https://raw.githubusercontent.com/nsheaps/greasemonkey-scripts/latest/packages/github-actions-grafana-jump/dist/script.user.js"
 }
