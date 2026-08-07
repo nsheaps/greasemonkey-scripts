@@ -1,5 +1,7 @@
 # Changelog
 
+## [0.3.7](https://github.com/nsheaps/greasemonkey-scripts/compare/release/last-run...0.3.7) (2026-08-07)
+
 ## [0.3.5](https://github.com/nsheaps/greasemonkey-scripts/compare/release/last-run...0.3.5) (2026-08-06)
 
 ### Features
