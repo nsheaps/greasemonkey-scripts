@@ -1,0 +1,1554 @@
+// ==UserScript==
+// @name        GitHub Actions => Grafana jump button
+// @version     0.2.6
+// @description Add a button on github.com Actions pages (PR checks, branch-filtered runs, a single workflow's runs, and runner detail pages) that jumps to a matching Grafana dashboard, Tempo trace, or any other URL you configure yourself
+// @author      Nathan Heaps
+// @namespace   https://www.github.com
+// @match       http*://www.github.com/*
+// @match       http*://github.com/*
+// @run-at      document-start
+// @icon        data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==
+// @grant       GM.setValue
+// @grant       GM.getValue
+// @grant       GM.xmlHttpRequest
+// @connect     raw.githubusercontent.com
+// @connect     api.github.com
+// @license     MIT
+// @downloadURL https://raw.githubusercontent.com/nsheaps/greasemonkey-scripts/latest/packages/github-actions-grafana-jump/dist/script.user.js
+// @updateURL   https://raw.githubusercontent.com/nsheaps/greasemonkey-scripts/latest/packages/github-actions-grafana-jump/dist/script.user.js
+// ==/UserScript==
+"use strict";
+// The `// ==UserScript==` metadata block for this script lives in
+// src/meta.json and is prepended to the compiled output by
+// scripts/build-userscript.mjs. See that script for why it isn't inlined here.
+//
+// Fully generic: no Grafana instance, dashboard UID, or template-variable name is
+// baked in. On first use (or whenever nothing configured applies to the current
+// page) the jump button opens an in-page configuration panel where you enter your
+// own Grafana base URL and one or more jump targets - a dashboard, a Tempo trace
+// search, or a generic link to any URL - each declaring which page-provided
+// fields it filters or templates by (repo, org, branch, PR number, workflow
+// file, runner, runner group, workflow run ID, job ID, and more - see
+// ContextFieldKey below). A target only shows up on pages that actually provide
+// every field it references. Once configured, the button jumps straight to the
+// best match, with a small "▾" menu to pick among multiple applicable targets or
+// to reopen the config panel. Shows inline alongside GitHub's own toolbar
+// buttons where possible (PR pages), else as a floating button - see the "DOM
+// injection" section below. Config is persisted via GM.setValue/GM.getValue,
+// scoped to this script.
+//
+// The `var-<name>=<value>` query-param convention used to preset a Grafana
+// dashboard's template variables from a URL is a genuine, documented Grafana
+// feature (see
+// https://grafana.com/docs/grafana/latest/dashboards/build-dashboards/create-dashboard-url-variables/);
+// what's dashboard-specific is only the variable *name* each dashboard happens to
+// use, which you can find in the Grafana UI (dashboard settings -> Variables) or
+// by exporting the dashboard JSON (e.g. with the `gcx` CLI).
+const CONTEXT_FIELD_KEYS = [
+    "repo",
+    "org",
+    "repoFullName",
+    "branch",
+    "prNumber",
+    "workflowName",
+    "runnerName",
+    "runnerGroupName",
+    "runId",
+    "jobId",
+    "serverUrl",
+    "apiUrl",
+];
+function isContextFieldKey(key) {
+    return CONTEXT_FIELD_KEYS.includes(key);
+}
+function defaultConfig() {
+    return { baseUrl: "", dashboards: [] };
+}
+function normalizeVarNames(raw) {
+    const varNamesRaw = typeof raw === "object" && raw !== null ? raw : {};
+    const varNames = {};
+    for (const key of CONTEXT_FIELD_KEYS) {
+        const value = varNamesRaw[key];
+        if (typeof value === "string" && value.trim() !== "") {
+            varNames[key] = value.trim();
+        }
+    }
+    return varNames;
+}
+/**
+ * Reshapes one raw dashboards[] entry into a well-formed JumpTargetConfig, or
+ * null if it's malformed enough that it can never be jumped to (no uid for a
+ * dashboard, or a missing id/datasourceUid/query for a trace search, or a
+ * missing id/urlTemplate for a link) - callers drop nulls rather than keeping
+ * a target that would only ever produce a broken link. Anything without
+ * `type: "trace"` or `type: "link"` is treated as a dashboard, which also
+ * covers the format's original shape (no `type` field at all).
+ */
+function normalizeTarget(raw) {
+    const name = typeof raw.name === "string" ? raw.name.trim() : "";
+    if (raw.type === "trace") {
+        const id = typeof raw.id === "string" ? raw.id.trim() : "";
+        const datasourceUid = typeof raw.datasourceUid === "string" ? raw.datasourceUid.trim() : "";
+        // A query can't contain a newline in the YAML-lite format it also has to
+        // round-trip through (see "Repo config parsing" below), which has no
+        // multi-line scalar support - collapse one defensively rather than
+        // silently exporting an invalid file.
+        const query = typeof raw.query === "string" ? raw.query.replace(/\s*\n\s*/g, " ").trim() : "";
+        if (id === "" || datasourceUid === "" || query === "")
+            return null;
+        return { type: "trace", name, id, datasourceUid, query };
+    }
+    if (raw.type === "link") {
+        const id = typeof raw.id === "string" ? raw.id.trim() : "";
+        const urlTemplate = typeof raw.urlTemplate === "string" ? raw.urlTemplate.replace(/\s*\n\s*/g, " ").trim() : "";
+        if (id === "" || urlTemplate === "")
+            return null;
+        return { type: "link", name, id, urlTemplate };
+    }
+    const uid = typeof raw.uid === "string" ? raw.uid.trim() : "";
+    const slug = typeof raw.slug === "string" ? raw.slug.trim() : "";
+    const varNames = normalizeVarNames(raw.varNames);
+    if (uid === "")
+        return null;
+    return { type: "dashboard", name, uid, slug, varNames };
+}
+/**
+ * Defensively reshapes a value loaded from storage (or pasted/hand-edited) into
+ * a well-formed GrafanaJumpConfig, dropping anything malformed rather than
+ * throwing. Keeps the rest of the script free of null/undefined-shape checks.
+ */
+function normalizeConfig(raw) {
+    if (typeof raw !== "object" || raw === null)
+        return defaultConfig();
+    const obj = raw;
+    const baseUrl = typeof obj.baseUrl === "string" ? obj.baseUrl.trim() : "";
+    const dashboardsRaw = Array.isArray(obj.dashboards) ? obj.dashboards : [];
+    const dashboards = dashboardsRaw
+        .filter((d) => typeof d === "object" && d !== null)
+        .map(normalizeTarget)
+        .filter((d) => d !== null);
+    return { baseUrl, dashboards };
+}
+/** True once there's at least a base URL and one dashboard to jump to. */
+function isConfigured(config) {
+    return config.baseUrl !== "" && config.dashboards.length > 0;
+}
+/**
+ * Matches a pull request's own pages (Conversation/Commits/Checks/Files changed),
+ * e.g. `/org/repo/pull/123` or `/org/repo/pull/123/checks`. Any sub-tab counts:
+ * they all show CI activity for the same PR/branch, which is what the Grafana
+ * dashboard filters by.
+ */
+function parsePrContext(pathname) {
+    const match = pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/.*)?$/);
+    if (!match)
+        return null;
+    const [, org, repo, prNumber] = match;
+    return { kind: "pr", org, repo, prNumber };
+}
+/**
+ * Extracts a `branch:<name>` filter out of a GitHub Actions search query string,
+ * e.g. `is:success branch:main` or `branch:"feature/some branch"`. Returns null if
+ * no branch filter is present.
+ */
+function extractBranchFromQuery(query) {
+    const quotedMatch = query.match(/branch:"([^"]*)"/);
+    if (quotedMatch)
+        return quotedMatch[1];
+    const bareMatch = query.match(/branch:(\S+)/);
+    return bareMatch ? bareMatch[1] : null;
+}
+/**
+ * Matches the repo Actions tab filtered down to a single branch via
+ * `?query=branch:<name>`, e.g. `/org/repo/actions?query=branch:my-feature`.
+ */
+function parseBranchContext(pathname, search) {
+    const pathMatch = pathname.match(/^\/([^/]+)\/([^/]+)\/actions\/?$/);
+    if (!pathMatch)
+        return null;
+    const params = new URLSearchParams(search);
+    const query = params.get("query");
+    if (!query)
+        return null;
+    const branch = extractBranchFromQuery(query);
+    if (!branch)
+        return null;
+    const [, org, repo] = pathMatch;
+    return { kind: "branch", org, repo, branch };
+}
+/**
+ * Matches a self-hosted runner's detail page, at either the repo scope
+ * (`/org/repo/settings/actions/runners/<id>`) or the org scope
+ * (`/organizations/<org>/settings/actions/runners/<id>`).
+ */
+function parseRunnerContext(pathname) {
+    // Checked first: "/organizations/<org>/settings/..." would otherwise also
+    // satisfy the repo-scope pattern below (with "organizations" mistaken for an
+    // org name), since both just look like "/<segment>/<segment>/settings/...".
+    const orgMatch = pathname.match(/^\/organizations\/([^/]+)\/settings\/actions\/runners\/(\d+)/);
+    if (orgMatch) {
+        const [, org, runnerId] = orgMatch;
+        return { kind: "runner", scope: "org", org, runnerId };
+    }
+    const repoMatch = pathname.match(/^\/([^/]+)\/([^/]+)\/settings\/actions\/runners\/(\d+)/);
+    if (repoMatch) {
+        const [, org, repo, runnerId] = repoMatch;
+        return { kind: "runner", scope: "repo", org, repo, runnerId };
+    }
+    return null;
+}
+/**
+ * Matches an organization's runner group detail page, e.g.
+ * `/organizations/<org>/settings/actions/runner-groups/<id>`. Runner groups
+ * are an org-level concept for pooling self-hosted runners across repos, so
+ * unlike parseRunnerContext there's no repo-scoped equivalent to match.
+ */
+function parseRunnerGroupContext(pathname) {
+    const match = pathname.match(/^\/organizations\/([^/]+)\/settings\/actions\/runner-groups\/(\d+)/);
+    if (!match)
+        return null;
+    const [, org, groupId] = match;
+    return { kind: "runnerGroup", org, groupId };
+}
+/**
+ * Matches a single workflow's own page, showing its runs across all branches,
+ * e.g. `/org/repo/actions/workflows/ci.yml`.
+ */
+function parseWorkflowContext(pathname) {
+    const match = pathname.match(/^\/([^/]+)\/([^/]+)\/actions\/workflows\/([^/?#]+)/);
+    if (!match)
+        return null;
+    const [, org, repo, workflowFile] = match;
+    return { kind: "workflow", org, repo, workflowFile };
+}
+/**
+ * Matches a workflow run's own page, and optionally one job's logs within it,
+ * e.g. `/org/repo/actions/runs/123456` or `/org/repo/actions/runs/123456/job/789`.
+ */
+function parseRunContext(pathname) {
+    const match = pathname.match(/^\/([^/]+)\/([^/]+)\/actions\/runs\/(\d+)(?:\/job\/(\d+))?/);
+    if (!match)
+        return null;
+    const [, org, repo, runId, jobId] = match;
+    return jobId ? { kind: "run", org, repo, runId, jobId } : { kind: "run", org, repo, runId };
+}
+/**
+ * Resolves the current location into whichever jump context applies, or null
+ * if none match. Order doesn't matter for correctness here since the path
+ * shapes are mutually exclusive, but the more specific runner/run paths are
+ * checked first per the existing convention.
+ */
+function resolveJumpContext(pathname, search) {
+    return (parseRunnerGroupContext(pathname) ??
+        parseRunnerContext(pathname) ??
+        parseRunContext(pathname) ??
+        parseWorkflowContext(pathname) ??
+        parsePrContext(pathname) ??
+        parseBranchContext(pathname, search));
+}
+/**
+ * The GitHub web UI's own origin and API origin - always present regardless
+ * of context, the same way `github.server_url`/`github.api_url` are always
+ * present in a GitHub Actions workflow's `github` context. Not derived from
+ * the page at all (github.com's web UI has no non-github.com origin to
+ * derive), but exposed as fields anyway so a link/trace template can build a
+ * fully-qualified URL back into GitHub or its API without hardcoding either.
+ */
+const GITHUB_SERVER_URL = "https://github.com";
+const GITHUB_API_URL = "https://api.github.com";
+/**
+ * All page-provided fields available for a given context, keyed the same way
+ * as DashboardVarNames / a trace query's or link's `{{placeholders}}`. Only
+ * the fields the current page actually carries are present - a jump target
+ * only shows up when every field it references (see requiredFields()) is one
+ * of these. `repo`/`org`/`repoFullName` are included for every context scoped
+ * to a single repo (everything except the org-scoped runner and runnerGroup
+ * pages), not just workflow/branch contexts, so a target that only cares
+ * about the repo name can show up anywhere within that repo. `serverUrl`/
+ * `apiUrl` are always present (see above) since every context is on
+ * github.com.
+ */
+function contextFields(context) {
+    const common = { serverUrl: GITHUB_SERVER_URL, apiUrl: GITHUB_API_URL };
+    const repoFields = (repo) => ({
+        repo,
+        org: context.org,
+        repoFullName: `${context.org}/${repo}`,
+    });
+    switch (context.kind) {
+        case "pr":
+            return { ...common, ...repoFields(context.repo), prNumber: context.prNumber };
+        case "branch":
+            return { ...common, ...repoFields(context.repo), branch: context.branch };
+        case "workflow":
+            return { ...common, ...repoFields(context.repo), workflowName: context.workflowFile };
+        case "run":
+            return {
+                ...common,
+                ...repoFields(context.repo),
+                runId: context.runId,
+                ...(context.jobId ? { jobId: context.jobId } : {}),
+            };
+        case "runner":
+            return {
+                ...common,
+                ...(context.repo ? repoFields(context.repo) : { org: context.org }),
+                runnerName: context.runnerId,
+            };
+        case "runnerGroup":
+            return { ...common, org: context.org, runnerGroupName: context.groupId };
+    }
+}
+/** Which ContextFieldKey `{{placeholders}}` a template string actually references. */
+function placeholderFields(template) {
+    const found = new Set();
+    const placeholderPattern = /\{\{(\w+)\}\}/g;
+    let match;
+    while ((match = placeholderPattern.exec(template))) {
+        if (isContextFieldKey(match[1]))
+            found.add(match[1]);
+    }
+    return [...found];
+}
+/**
+ * Which of a target's configured fields (varNames entries for a dashboard, or
+ * `{{placeholder}}` references for a trace query or link URL template) it
+ * needs present on the page to be jumpable. A target with none configured is
+ * treated as needing something it can never match, not as universally
+ * applicable.
+ */
+function requiredFields(target) {
+    if (target.type === "trace")
+        return placeholderFields(target.query);
+    if (target.type === "link")
+        return placeholderFields(target.urlTemplate);
+    return CONTEXT_FIELD_KEYS.filter((key) => Boolean(target.varNames[key]));
+}
+/**
+ * Which of the configured dashboards/traces can actually be jumped to for
+ * this context - i.e. every field the target is configured to filter or
+ * template by is one this context's page actually provides (see
+ * contextFields() and requiredFields()). A target that needs a field this
+ * page doesn't have is left out entirely, rather than linked to with that
+ * filter silently dropped.
+ */
+function applicableDashboards(config, context) {
+    const fields = contextFields(context);
+    return config.dashboards.filter((target) => {
+        const required = requiredFields(target);
+        return required.length > 0 && required.every((key) => Boolean(fields[key]));
+    });
+}
+/**
+ * The {org, repo} a jump context belongs to, for looking up that repo's
+ * `.github/jump-links.config.yaml` - or null when the context isn't scoped to
+ * one repo (an org-scoped runner or runner-group page covers every repo in
+ * the org, so there's no single repo config to fetch).
+ */
+function repoContextForJump(context) {
+    switch (context.kind) {
+        case "pr":
+        case "branch":
+        case "workflow":
+        case "run":
+            return { org: context.org, repo: context.repo };
+        case "runner":
+            return context.repo ? { org: context.org, repo: context.repo } : null;
+        case "runnerGroup":
+            return null;
+    }
+}
+/**
+ * Resolves which dashboards are actually offered as jump targets for a
+ * context, given the user's own (personal, GM-storage) config and the
+ * current repo's checked-in config (or null if there isn't one / it failed to
+ * load). The personal config always wins outright when it has anything
+ * applicable to this context - repoConfig is a fallback for contributors who
+ * haven't set up their own config yet, not something merged dashboard-by-
+ * dashboard with the personal one. Merging would require reconciling two
+ * potentially different Grafana base URLs per dashboard; keeping the two
+ * configs mutually exclusive per render avoids that entirely.
+ */
+function activeDashboards(personalConfig, repoConfig, context) {
+    const personal = applicableDashboards(personalConfig, context);
+    if (personal.length > 0) {
+        return personal.map((dashboard) => ({ baseUrl: personalConfig.baseUrl, dashboard }));
+    }
+    if (!repoConfig)
+        return [];
+    return applicableDashboards(repoConfig, context).map((dashboard) => ({
+        baseUrl: repoConfig.baseUrl,
+        dashboard,
+    }));
+}
+/**
+ * A stable identity for deduping targets on export - a dashboard's own
+ * Grafana uid, or a trace/link target's user-chosen id (traces and links have
+ * no Grafana-assigned uid of their own to dedupe on).
+ */
+function targetKey(target) {
+    if (target.type === "trace")
+        return `trace:${target.id}`;
+    if (target.type === "link")
+        return `link:${target.id}`;
+    return `dashboard:${target.uid}`;
+}
+/**
+ * Combines a repo's existing checked-in config with the current user's own
+ * config, for exporting back into the repo - unlike activeDashboards() above,
+ * this is a real union: the point of exporting is to publish your personal
+ * dashboards/traces for the rest of the repo, on top of whatever's already
+ * shared, not to pick one source over the other. Targets are deduped by
+ * targetKey(), preferring the repo's own copy of a key that appears in both
+ * (it may have been intentionally edited by someone else since you last
+ * synced). baseUrl prefers the repo's if it has one, since the merged target
+ * list is exported as a single file with one shared baseUrl field - if your
+ * personal targets actually live under a *different* Grafana instance than
+ * the repo's, this merge would produce an incorrect shared baseUrl for one
+ * set of them; that caveat is surfaced in the exported file's header comment
+ * rather than silently guessed at here.
+ */
+function mergeConfigsForExport(repoConfig, personalConfig) {
+    const merged = repoConfig ? [...repoConfig.dashboards] : [];
+    const knownKeys = new Set(merged.map(targetKey));
+    for (const target of personalConfig.dashboards) {
+        const key = targetKey(target);
+        if (!knownKeys.has(key)) {
+            merged.push(target);
+            knownKeys.add(key);
+        }
+    }
+    return {
+        baseUrl: repoConfig?.baseUrl || personalConfig.baseUrl,
+        dashboards: merged,
+    };
+}
+/**
+ * Builds a Grafana dashboard URL with one or more template variables preset via
+ * the `var-<name>=<value>` query convention.
+ */
+function buildDashboardUrl(baseUrl, dashboard, vars) {
+    const params = Object.entries(vars)
+        .map(([name, value]) => `var-${encodeURIComponent(name)}=${encodeURIComponent(value)}`)
+        .join("&");
+    const query = params ? `?${params}` : "";
+    return `${baseUrl}/d/${dashboard.uid}/${dashboard.slug}${query}`;
+}
+/**
+ * Substitutes `{{fieldKey}}` placeholders in a TraceQL query template with
+ * values from the current context (see contextFields()). A placeholder for a
+ * field this page doesn't actually have (which shouldn't happen for a target
+ * requiredFields() already gated as applicable, but could for a stray typo
+ * in the query) is left untouched rather than silently blanked out, so a
+ * malformed query is visibly broken instead of quietly matching too much.
+ */
+function renderTemplate(template, fields) {
+    return template.replace(/\{\{(\w+)\}\}/g, (whole, key) => {
+        const value = isContextFieldKey(key) ? fields[key] : undefined;
+        return value ?? whole;
+    });
+}
+/**
+ * Builds a Grafana Explore URL running a TraceQL search against a Tempo
+ * datasource - the `panes` query param is the same shape Explore itself
+ * generates when you build a query there by hand (an object keyed by an
+ * arbitrary pane id, JSON-encoded into the URL). There's no way to know how
+ * far back a given GitHub Actions run's trace lives, so this always searches
+ * the last 7 days; widen the range in Grafana itself for anything older.
+ */
+function buildTraceExploreUrl(baseUrl, target, fields) {
+    const pane = {
+        datasource: target.datasourceUid,
+        queries: [
+            {
+                refId: "A",
+                queryType: "traceql",
+                query: renderTemplate(target.query, fields),
+                datasource: { uid: target.datasourceUid },
+            },
+        ],
+        range: { from: "now-7d", to: "now" },
+    };
+    const params = new URLSearchParams({
+        schemaVersion: "1",
+        orgId: "1",
+        panes: JSON.stringify({ jump: pane }),
+    });
+    return `${baseUrl}/explore?${params.toString()}`;
+}
+/**
+ * Builds the jump URL for one target against a resolved context - a Grafana
+ * dashboard link with its own var- filters preset, a Tempo trace search with
+ * its query template filled in, or a fully generic URL with its own template
+ * filled in (baseUrl is meaningless for a link target and ignored, since its
+ * urlTemplate is already the whole URL). Assumes the target is applicable
+ * (see applicableDashboards) - callers that skip that check just get a link
+ * with whichever filters/placeholders the page happens to provide, silently
+ * omitted otherwise.
+ */
+function buildJumpUrl(baseUrl, target, context) {
+    const fields = contextFields(context);
+    if (target.type === "trace")
+        return buildTraceExploreUrl(baseUrl, target, fields);
+    if (target.type === "link")
+        return renderTemplate(target.urlTemplate, fields);
+    const vars = {};
+    for (const key of CONTEXT_FIELD_KEYS) {
+        const varName = target.varNames[key];
+        const value = fields[key];
+        if (varName && value)
+            vars[varName] = value;
+    }
+    return buildDashboardUrl(baseUrl, target, vars);
+}
+/** name if set, else whatever stable identifier the target has instead. */
+function targetDisplayName(target) {
+    if (target.name)
+        return target.name;
+    return target.type === "dashboard" ? target.uid : target.id;
+}
+/** Human-readable label for the jump button, specific to the matched context. */
+function labelForContext(context) {
+    switch (context.kind) {
+        case "pr":
+            return `Grafana: PR #${context.prNumber} CI`;
+        case "branch":
+            return `Grafana: ${context.branch} CI`;
+        case "workflow":
+            return `Grafana: ${context.workflowFile} runs`;
+        case "run":
+            return context.jobId
+                ? `Grafana: run #${context.runId} / job #${context.jobId}`
+                : `Grafana: run #${context.runId}`;
+        case "runner":
+            return `Grafana: runner ${context.runnerId}`;
+        case "runnerGroup":
+            return `Grafana: runner group ${context.groupId}`;
+    }
+}
+function tokenizeYamlLite(text) {
+    return text
+        .split("\n")
+        .map((line) => line.replace(/\r$/, ""))
+        .filter((line) => line.trim() !== "" && !line.trim().startsWith("#"))
+        .map((line) => ({
+        indent: line.length - line.replace(/^ */, "").length,
+        content: line.trim(),
+    }));
+}
+function unquoteYamlLiteScalar(value) {
+    const trimmed = value.trim();
+    if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+        // Reverses the escaping yamlLiteScalar() applies when it double-quotes a
+        // value: a backslash followed by a backslash or a double quote is that
+        // literal character, unescaped. Single-quoted scalars (below) never get
+        // this treatment - yamlLiteScalar() only ever produces double-quoted
+        // output; single-quote support here is only for reading hand-written
+        // ones, which this format has no backslash-escaping convention for.
+        return trimmed.slice(1, -1).replace(/\\(["\\])/g, "$1");
+    }
+    if (trimmed.length >= 2 && trimmed.startsWith("'") && trimmed.endsWith("'")) {
+        return trimmed.slice(1, -1);
+    }
+    return trimmed;
+}
+function isYamlLiteSeqItem(content) {
+    return content === "-" || content.startsWith("- ");
+}
+function parseYamlLiteMapEntry(lines, pos, indent) {
+    const line = lines[pos.i];
+    const colonIdx = line.content.indexOf(":");
+    if (colonIdx === -1) {
+        // Malformed line for this format; skip it rather than throw, consistent
+        // with normalizeConfig()'s general policy of dropping bad input.
+        pos.i++;
+        return {};
+    }
+    const key = line.content.slice(0, colonIdx).trim();
+    const value = line.content.slice(colonIdx + 1).trim();
+    pos.i++;
+    if (value !== "")
+        return { [key]: unquoteYamlLiteScalar(value) };
+    if (pos.i < lines.length && lines[pos.i].indent > indent) {
+        return { [key]: parseYamlLiteBlock(lines, pos, lines[pos.i].indent) };
+    }
+    return { [key]: "" };
+}
+function parseYamlLiteSequence(lines, pos, indent) {
+    const result = [];
+    while (pos.i < lines.length && lines[pos.i].indent === indent && isYamlLiteSeqItem(lines[pos.i].content)) {
+        const content = lines[pos.i].content;
+        const rest = content === "-" ? "" : content.slice(2);
+        if (rest === "") {
+            pos.i++;
+            const childIndent = pos.i < lines.length ? lines[pos.i].indent : indent;
+            result.push(childIndent > indent ? parseYamlLiteBlock(lines, pos, childIndent) : "");
+        }
+        else if (rest.includes(":")) {
+            // "- key: value" opens an inline mapping item. Its first key has no
+            // line of its own to read an indent from - the dash and the space
+            // after it occupy 2 columns, so sibling keys line up at indent + 2.
+            // This is the one place a fixed offset is required rather than read
+            // from the input, same as real YAML.
+            const itemIndent = indent + 2;
+            const colonIdx = rest.indexOf(":");
+            const key = rest.slice(0, colonIdx).trim();
+            const value = rest.slice(colonIdx + 1).trim();
+            pos.i++;
+            const map = {
+                [key]: value !== ""
+                    ? unquoteYamlLiteScalar(value)
+                    : pos.i < lines.length && lines[pos.i].indent > itemIndent
+                        ? parseYamlLiteBlock(lines, pos, lines[pos.i].indent)
+                        : "",
+            };
+            while (pos.i < lines.length && lines[pos.i].indent === itemIndent) {
+                Object.assign(map, parseYamlLiteMapEntry(lines, pos, itemIndent));
+            }
+            result.push(map);
+        }
+        else {
+            pos.i++;
+            result.push(unquoteYamlLiteScalar(rest));
+        }
+    }
+    return result;
+}
+function parseYamlLiteBlock(lines, pos, indent) {
+    if (pos.i >= lines.length || lines[pos.i].indent !== indent)
+        return {};
+    if (isYamlLiteSeqItem(lines[pos.i].content))
+        return parseYamlLiteSequence(lines, pos, indent);
+    const map = {};
+    while (pos.i < lines.length && lines[pos.i].indent === indent && !isYamlLiteSeqItem(lines[pos.i].content)) {
+        Object.assign(map, parseYamlLiteMapEntry(lines, pos, indent));
+    }
+    return map;
+}
+/** Parses the YAML subset described above into plain objects/arrays/strings. */
+function parseYamlLite(text) {
+    const lines = tokenizeYamlLite(text);
+    if (lines.length === 0)
+        return {};
+    return parseYamlLiteBlock(lines, { i: 0 }, lines[0].indent);
+}
+/**
+ * Renders a plain scalar for the YAML-lite format above, quoting only when
+ * necessary - kept minimal (not general YAML-correct) since it only ever has
+ * to round-trip through parseYamlLite's own unquoting logic.
+ */
+function yamlLiteScalar(value) {
+    const needsQuoting = value === "" ||
+        value !== value.trim() ||
+        /^[\s\-?:,[\]{}#&*!|>'"%@`]/.test(value) ||
+        /: |:$/.test(value) ||
+        / #/.test(value);
+    if (!needsQuoting)
+        return value;
+    return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+/** Serializes a GrafanaJumpConfig into the YAML-lite format parseYamlLite reads. */
+function configToYamlLite(config) {
+    const lines = [`baseUrl: ${yamlLiteScalar(config.baseUrl)}`];
+    if (config.dashboards.length === 0) {
+        lines.push("dashboards: []");
+        return `${lines.join("\n")}\n`;
+    }
+    lines.push("dashboards:");
+    for (const target of config.dashboards) {
+        lines.push(`  - type: ${yamlLiteScalar(target.type)}`);
+        lines.push(`    name: ${yamlLiteScalar(target.name)}`);
+        if (target.type === "trace") {
+            lines.push(`    id: ${yamlLiteScalar(target.id)}`);
+            lines.push(`    datasourceUid: ${yamlLiteScalar(target.datasourceUid)}`);
+            lines.push(`    query: ${yamlLiteScalar(target.query)}`);
+            continue;
+        }
+        if (target.type === "link") {
+            lines.push(`    id: ${yamlLiteScalar(target.id)}`);
+            lines.push(`    urlTemplate: ${yamlLiteScalar(target.urlTemplate)}`);
+            continue;
+        }
+        lines.push(`    uid: ${yamlLiteScalar(target.uid)}`);
+        lines.push(`    slug: ${yamlLiteScalar(target.slug)}`);
+        const varEntries = CONTEXT_FIELD_KEYS.filter((key) => Boolean(target.varNames[key]));
+        if (varEntries.length === 0) {
+            lines.push("    varNames: {}");
+        }
+        else {
+            lines.push("    varNames:");
+            for (const key of varEntries) {
+                lines.push(`      ${key}: ${yamlLiteScalar(target.varNames[key])}`);
+            }
+        }
+    }
+    return `${lines.join("\n")}\n`;
+}
+// ---------------------------------------------------------------------------
+// Config persistence. Wrapped so the rest of the script only ever deals with a
+// GrafanaJumpConfig object, never the raw JSON-string storage format.
+// ---------------------------------------------------------------------------
+const CONFIG_STORAGE_KEY = "grafanaJumpConfig.v1";
+async function loadConfig() {
+    const raw = await GM.getValue(CONFIG_STORAGE_KEY, "");
+    if (typeof raw !== "string" || raw === "")
+        return defaultConfig();
+    try {
+        return normalizeConfig(JSON.parse(raw));
+    }
+    catch {
+        return defaultConfig();
+    }
+}
+async function saveConfig(config) {
+    await GM.setValue(CONFIG_STORAGE_KEY, JSON.stringify(config));
+}
+// ---------------------------------------------------------------------------
+// Update notification. Compares the version currently running (GM.info.script
+// .version, which the user's script manager has already updated in the
+// background per @updateURL/@downloadURL by the time this runs) against the
+// version we last recorded seeing - not against "the latest available
+// version" over the network. There is nothing to poll for: if the two
+// differ, the script manager already applied an update just now, and this is
+// purely a local, no-network notice of that fact (mirroring cept's own
+// UpdateToast, which fires after a service worker update reloads the page,
+// not before one is available).
+// ---------------------------------------------------------------------------
+const LAST_SEEN_VERSION_KEY = "grafanaJumpLastSeenVersion.v1";
+const CHANGELOG_URL = "https://github.com/nsheaps/greasemonkey-scripts/blob/main/packages/github-actions-grafana-jump/CHANGELOG.md";
+/**
+ * Whether `current` is a genuine update over `lastSeen`, not just this
+ * script's first-ever run (an empty lastSeen, nothing stored yet) or a
+ * no-op reload on the same version.
+ */
+function isVersionUpdate(lastSeen, current) {
+    return lastSeen !== "" && lastSeen !== current;
+}
+/**
+ * Records the currently-running version as "seen", returning the previously
+ * recorded version - a toast is due iff isVersionUpdate(previous, current).
+ * Always records (even on first run) so next time has something to compare
+ * against.
+ */
+async function recordSeenVersion(current) {
+    const previous = await GM.getValue(LAST_SEEN_VERSION_KEY, "");
+    await GM.setValue(LAST_SEEN_VERSION_KEY, current);
+    return typeof previous === "string" ? previous : "";
+}
+const TOAST_ID = "grafanaJumpUpdateToast";
+const TOAST_AUTO_DISMISS_MS = 10000;
+const TOAST_EXIT_MS = 300;
+const TOAST_BASE_STYLE = "position: fixed; bottom: 1.5rem; left: 50%; z-index: 2147483647; display: flex; " +
+    "align-items: center; gap: 0.75rem; padding: 0.75rem 1.25rem; border-radius: 0.5rem; " +
+    "background: #1a1a2e; color: #e0e0e0; font-size: 0.875rem; " +
+    "font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; " +
+    "box-shadow: 0 4px 12px rgba(0,0,0,0.3); pointer-events: auto; " +
+    "transition: opacity 0.3s ease, transform 0.3s ease;";
+const TOAST_HIDDEN_STYLE = `${TOAST_BASE_STYLE} opacity: 0; transform: translateX(-50%) translateY(1rem);`;
+const TOAST_SHOWN_STYLE = `${TOAST_BASE_STYLE} opacity: 1; transform: translateX(-50%) translateY(0);`;
+/**
+ * Shows a toast noting the update, linking to this package's own CHANGELOG.md
+ * (generated per-release by release-it/conventional-changelog - see
+ * .release-it.js - so it's already up to date for whatever version this is
+ * without this script generating anything itself). Styled after cept's own
+ * UpdateToast component (packages/web/src/UpdateToast.tsx): a dark, centered,
+ * bottom-fixed pill that fades/slides in, then back out before removal.
+ * Auto-dismisses after 10s per the same design, but this toast has no
+ * "visible" prop to drive that from - the timer and the fade-out it triggers
+ * are both owned here instead.
+ */
+function showUpdateToast(newVersion) {
+    document.getElementById(TOAST_ID)?.remove();
+    const toast = document.createElement("div");
+    toast.id = TOAST_ID;
+    toast.setAttribute("role", "status");
+    toast.setAttribute("aria-live", "polite");
+    toast.setAttribute("style", TOAST_HIDDEN_STYLE);
+    const link = document.createElement("a");
+    link.textContent = `GitHub Actions ↔ Grafana jump updated to v${newVersion} — see what's new`;
+    link.setAttribute("href", CHANGELOG_URL);
+    link.setAttribute("target", "_blank");
+    link.setAttribute("rel", "noopener noreferrer");
+    link.setAttribute("style", "color: inherit; text-decoration: underline;");
+    toast.appendChild(link);
+    let dismissTimer;
+    const dismiss = () => {
+        if (dismissTimer)
+            clearTimeout(dismissTimer);
+        toast.setAttribute("style", TOAST_HIDDEN_STYLE);
+        setTimeout(() => toast.remove(), TOAST_EXIT_MS);
+    };
+    const closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.textContent = "×";
+    closeButton.setAttribute("aria-label", "Dismiss notification");
+    closeButton.setAttribute("style", "background: none; border: none; color: #888; cursor: pointer; font-size: 1.1rem; " +
+        "line-height: 1; padding: 0 0.25rem;");
+    closeButton.addEventListener("click", dismiss);
+    toast.appendChild(closeButton);
+    document.body.appendChild(toast);
+    // Deferred a frame so the transition in TOAST_SHOWN_STYLE actually
+    // animates from TOAST_HIDDEN_STYLE, rather than the browser coalescing
+    // both style writes into one and skipping straight to the end state.
+    requestAnimationFrame(() => toast.setAttribute("style", TOAST_SHOWN_STYLE));
+    dismissTimer = setTimeout(dismiss, TOAST_AUTO_DISMISS_MS);
+}
+async function checkForUpdate() {
+    const current = GM.info.script.version;
+    const previous = await recordSeenVersion(current);
+    if (isVersionUpdate(previous, current))
+        showUpdateToast(current);
+}
+// ---------------------------------------------------------------------------
+// Repo config fetching. Cross-origin (github.com -> raw.githubusercontent.com)
+// requests from an injected page script are subject to GitHub's own CSP, so
+// this uses GM.xmlHttpRequest (granted in meta.json, with a matching
+// @connect for raw.githubusercontent.com) rather than page-context fetch() -
+// GM.xmlHttpRequest is exempt from the page's CSP/CORS by design, which is
+// exactly why it exists.
+//
+// Cached per {org, repo} for the life of the tab: GitHub's Actions/PR pages
+// are a single-page app, so navigating between pages in the same repo would
+// otherwise re-fetch this on every checkLocation() call for no reason.
+// ---------------------------------------------------------------------------
+const REPO_CONFIG_PATH = ".github/jump-links.config.yaml";
+const repoConfigCache = new Map();
+function fetchRepoConfig(org, repo) {
+    const key = `${org}/${repo}`;
+    const cached = repoConfigCache.get(key);
+    if (cached)
+        return cached;
+    const promise = new Promise((resolve) => {
+        const url = `https://raw.githubusercontent.com/${encodeURIComponent(org)}/${encodeURIComponent(repo)}` +
+            `/HEAD/${REPO_CONFIG_PATH}`;
+        GM.xmlHttpRequest({
+            method: "GET",
+            url,
+            onload: (response) => {
+                if (response.status !== 200) {
+                    resolve(null);
+                    return;
+                }
+                try {
+                    resolve(normalizeConfig(parseYamlLite(response.responseText)));
+                }
+                catch {
+                    resolve(null);
+                }
+            },
+            onerror: () => resolve(null),
+        });
+    });
+    repoConfigCache.set(key, promise);
+    return promise;
+}
+const defaultBranchCache = new Map();
+/**
+ * GitHub's "create/edit file" web UI is addressed by branch name, not by the
+ * "HEAD" alias fetchRepoConfig() above gets to use (that alias only exists
+ * for raw.githubusercontent.com content URLs) - so building a link into that
+ * UI needs the actual default branch name. Falls back to "main" on any
+ * failure; worst case the resulting link's branch segment is wrong and
+ * GitHub's own UI surfaces that, rather than anything failing silently.
+ */
+function resolveDefaultBranch(org, repo) {
+    const key = `${org}/${repo}`;
+    const cached = defaultBranchCache.get(key);
+    if (cached)
+        return cached;
+    const promise = new Promise((resolve) => {
+        GM.xmlHttpRequest({
+            method: "GET",
+            url: `https://api.github.com/repos/${encodeURIComponent(org)}/${encodeURIComponent(repo)}`,
+            onload: (response) => {
+                try {
+                    const data = JSON.parse(response.responseText);
+                    const branch = typeof data === "object" && data !== null && typeof data.default_branch === "string"
+                        ? data.default_branch
+                        : "";
+                    resolve(branch || "main");
+                }
+                catch {
+                    resolve("main");
+                }
+            },
+            onerror: () => resolve("main"),
+        });
+    });
+    defaultBranchCache.set(key, promise);
+    return promise;
+}
+/**
+ * A link into GitHub's own "create new file" web UI, pre-filled with a path
+ * and content. Committing from there goes through GitHub's normal auth/PR
+ * flow (direct commit if you can push, a fork+PR if you can't) - this script
+ * never touches the repo's git history itself, only hands GitHub's own UI a
+ * suggested path and content to start from. Works the same whether or not
+ * that path already exists: GitHub's create-file UI detects an existing file
+ * at the given path and lets the pre-filled content replace it from there.
+ */
+function buildCreateFileUrl(org, repo, branch, path, content) {
+    const params = new URLSearchParams({ filename: path, value: content });
+    return `https://github.com/${org}/${repo}/new/${branch}?${params.toString()}`;
+}
+const REPO_CONFIG_TEMPLATE = `# Config for the "GitHub Actions => Grafana jump button" userscript
+# (https://github.com/nsheaps/greasemonkey-scripts/tree/main/packages/github-actions-grafana-jump).
+# Gives every contributor to this repo the same jump targets without each of
+# them configuring the userscript by hand. A contributor's own personal
+# config (set via the userscript's own "Set up links" panel) always takes
+# priority over this file for any page it covers - this is only a fallback
+# for pages nobody has personally configured.
+#
+# baseUrl: your Grafana instance's base URL (no trailing slash). Only used by
+#   type: dashboard and type: trace entries below - a type: link entry's URL
+#   is already complete on its own.
+# dashboards: one entry per jump target. Each entry is a Grafana dashboard
+#   link (type: dashboard), a Tempo trace search (type: trace), or a link to
+#   any other URL (type: link). A target only shows up as a jump target on
+#   pages that provide every field it's configured to use - not all fields
+#   are available on every page (a branch's Actions page has no workflow run
+#   ID, for example), so different targets naturally show up on different
+#   pages.
+#
+#   Available fields (named after GitHub Actions' own \`github\` context,
+#   as far as a page's URL actually provides an equivalent value):
+#     repo, org, repoFullName (org/repo), branch, prNumber, workflowName,
+#     runnerName, runnerGroupName, runId, jobId, serverUrl, apiUrl.
+#
+#   type: dashboard
+#     name     - display label for the jump button/menu.
+#     uid      - the dashboard's UID (Grafana dashboard settings -> JSON
+#                Model, or the segment right after /d/ in the dashboard's
+#                URL).
+#     slug     - the URL slug right after the uid in the dashboard's URL.
+#     varNames - which of this dashboard's template variables (if any) to
+#                preset from the current GitHub page, keyed by one of the
+#                fields above. Leave a field out if the dashboard doesn't use
+#                that kind of filter.
+#
+#   type: trace
+#     name          - display label for the jump button/menu.
+#     id            - any string unique among your trace/link targets; used
+#                      only to dedupe when exporting/merging this file, not
+#                      shown anywhere.
+#     datasourceUid - the Tempo datasource's UID in Grafana (Connections ->
+#                     Data sources -> your Tempo source -> the "uid" in its
+#                     URL or Settings JSON).
+#     query         - a TraceQL query with \`{{fieldKey}}\` placeholders (any
+#                     field above) filled in from the current GitHub page -
+#                     adjust the attribute names below (e.g.
+#                     resource.github.run_id) to match however your own
+#                     traces are tagged.
+#
+#   type: link
+#     name        - display label for the jump button/menu.
+#     id          - any string unique among your trace/link targets; same
+#                    role as a trace target's id.
+#     urlTemplate - a full URL with \`{{fieldKey}}\` placeholders (any field
+#                   above) filled in from the current GitHub page - for
+#                   linking anywhere, not just Grafana (a wiki, a runbook, a
+#                   dashboard in some other tool entirely).
+baseUrl: https://grafana.example.com
+dashboards:
+  - type: dashboard
+    name: Workflow runs for this repo
+    uid: REPLACE_WITH_DASHBOARD_UID
+    slug: REPLACE_WITH_DASHBOARD_SLUG
+    varNames:
+      repo: repository
+  - type: dashboard
+    name: Workflow runs on this runner
+    uid: REPLACE_WITH_DASHBOARD_UID
+    slug: REPLACE_WITH_DASHBOARD_SLUG
+    varNames:
+      runnerName: runner_name
+  - type: dashboard
+    name: Workflow runs for this branch
+    uid: REPLACE_WITH_DASHBOARD_UID
+    slug: REPLACE_WITH_DASHBOARD_SLUG
+    varNames:
+      repo: repository
+      branch: branch
+  - type: trace
+    name: Trace for this workflow run
+    id: workflow-run-trace
+    datasourceUid: REPLACE_WITH_TEMPO_DATASOURCE_UID
+    query: '{resource.github.run_id="{{runId}}"}'
+  - type: trace
+    name: Span for this job
+    id: workflow-job-span
+    datasourceUid: REPLACE_WITH_TEMPO_DATASOURCE_UID
+    query: '{resource.github.run_id="{{runId}}" && resource.github.job_id="{{jobId}}"}'
+  - type: link
+    name: Runbook for this repo
+    id: repo-runbook
+    urlTemplate: 'https://runbooks.example.com/{{repoFullName}}'
+`;
+// ---------------------------------------------------------------------------
+// DOM injection.
+//
+// GitHub's Actions/PR pages are a pjax/React SPA, and (confirmed by inspecting
+// the live DOM while building this script) most header/toolbar elements are
+// styled with Primer React's hashed CSS-module class names (e.g.
+// "prc-TabNav-TabNavTabList-Ave63"), which are not stable across GitHub
+// front-end deploys and unsafe to hardcode as selectors. A PR's own header
+// toolbar is the one confirmed exception - see PR_TOOLBAR_SELECTOR below,
+// already relied on by github-to-graphite-button - so only PR pages get an
+// inline button injected directly into it (renderInlineButton()). Every other
+// supported context (branch/workflow/run/runner/runnerGroup, all on the
+// Actions tab rather than a PR) falls back to a single fixed-position button
+// that appears whenever the current URL matches a supported context and
+// disappears otherwise - this only depends on `location`, not on any GitHub
+// toolbar DOM shape, so it degrades gracefully (no button, no navigation left
+// to fix) if GitHub reshuffles that page's layout again.
+// ---------------------------------------------------------------------------
+const CONTAINER_ID = "grafanaJumpContainer";
+const BUTTON_STYLE = "display: inline-block; background: #F55F0E; color: #fff; padding: 8px 12px; " +
+    "border: none; border-radius: 6px 0 0 6px; font-size: 12px; font-weight: 600; " +
+    "font-family: inherit; text-decoration: none; cursor: pointer; vertical-align: top;";
+const TOGGLE_STYLE = "display: inline-block; background: #c94c0a; color: #fff; padding: 8px 8px; " +
+    "border: none; border-left: 1px solid rgba(255,255,255,0.3); border-radius: 0 6px 6px 0; " +
+    "font-size: 12px; font-family: inherit; cursor: pointer; vertical-align: top;";
+const SOLO_BUTTON_STYLE = "display: inline-block; background: #57606a; color: #fff; padding: 8px 12px; " +
+    "border: none; border-radius: 6px; font-size: 12px; font-weight: 600; " +
+    "font-family: inherit; text-decoration: none; cursor: pointer;";
+const MENU_STYLE = "position: absolute; bottom: 100%; right: 0; margin-bottom: 4px; background: #fff; " +
+    "color: #24292f; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.25); " +
+    "min-width: 180px; overflow: hidden; font-family: inherit;";
+const MENU_ITEM_STYLE = "display: block; padding: 8px 12px; font-size: 12px; text-decoration: none; " +
+    "color: inherit; white-space: nowrap; cursor: pointer; background: none; " +
+    "border: none; width: 100%; text-align: left; box-sizing: border-box;";
+let currentConfig = defaultConfig();
+// The current page's repo config (see the "Repo config fetching" section
+// above), and the "org/repo" key it belongs to - null/undefined until a repo
+// config has actually been fetched (or the current context isn't scoped to a
+// single repo at all, e.g. the org-scoped runner page).
+let currentRepoConfig = null;
+let currentRepoConfigKey;
+function closeMenu() {
+    document.getElementById(`${CONTAINER_ID}-menu`)?.remove();
+}
+function openMenu(anchorContainer, items) {
+    closeMenu();
+    const menu = document.createElement("div");
+    menu.id = `${CONTAINER_ID}-menu`;
+    menu.setAttribute("style", MENU_STYLE);
+    for (const item of items) {
+        const entry = document.createElement("button");
+        entry.type = "button";
+        entry.textContent = item.label;
+        entry.setAttribute("style", MENU_ITEM_STYLE);
+        entry.addEventListener("mouseenter", () => {
+            entry.style.background = "#f6f8fa";
+        });
+        entry.addEventListener("mouseleave", () => {
+            entry.style.background = "none";
+        });
+        entry.addEventListener("click", (event) => {
+            event.stopPropagation();
+            closeMenu();
+            item.onClick();
+        });
+        menu.appendChild(entry);
+    }
+    anchorContainer.appendChild(menu);
+    // Close on next outside click. Deferred so this listener doesn't also catch
+    // the very click that opened the menu.
+    setTimeout(() => {
+        document.addEventListener("click", closeMenu, { once: true });
+    }, 0);
+}
+function openConfigModal(repoCtx) {
+    closeMenu();
+    // Work on a deep-ish draft copy so Cancel leaves the saved config untouched.
+    const draft = {
+        baseUrl: currentConfig.baseUrl,
+        dashboards: currentConfig.dashboards.map((d) => d.type === "dashboard" ? { ...d, varNames: { ...d.varNames } } : { ...d }),
+    };
+    const overlay = document.createElement("div");
+    overlay.setAttribute("style", "position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 2147483646; " +
+        "display: flex; align-items: center; justify-content: center; font-family: sans-serif;");
+    overlay.addEventListener("click", (event) => {
+        if (event.target === overlay)
+            document.body.removeChild(overlay);
+    });
+    const panel = document.createElement("div");
+    panel.setAttribute("style", "background: #fff; color: #24292f; border-radius: 8px; padding: 20px; " +
+        "width: 520px; max-width: 90vw; max-height: 85vh; overflow-y: auto; " +
+        "box-shadow: 0 8px 24px rgba(0,0,0,0.4);");
+    panel.addEventListener("click", (event) => event.stopPropagation());
+    const title = document.createElement("h2");
+    title.textContent = "Configure Grafana jump";
+    title.setAttribute("style", "margin: 0 0 12px; font-size: 16px;");
+    panel.appendChild(title);
+    const help = document.createElement("p");
+    help.textContent =
+        "Set your Grafana base URL and the jump targets to offer - a dashboard link, a Tempo " +
+            "trace search, or a generic link to any URL. For a dashboard, fill in whichever " +
+            "template-variable names it uses (dashboard settings -> Variables); for a trace or a " +
+            "generic link, write a query/URL using {{fieldKey}} placeholders. A target only shows " +
+            "up on a page that provides every field it references - leave fields blank/out of the " +
+            "query or URL if a target doesn't need them.";
+    help.setAttribute("style", "margin: 0 0 16px; font-size: 12px; color: #57606a;");
+    panel.appendChild(help);
+    const baseUrlLabel = document.createElement("label");
+    baseUrlLabel.textContent = "Grafana base URL";
+    baseUrlLabel.setAttribute("style", "display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px;");
+    panel.appendChild(baseUrlLabel);
+    const baseUrlInput = document.createElement("input");
+    baseUrlInput.type = "text";
+    baseUrlInput.placeholder = "https://grafana.example.com";
+    baseUrlInput.value = draft.baseUrl;
+    baseUrlInput.setAttribute("style", "display: block; width: 100%; box-sizing: border-box; padding: 6px 8px; " +
+        "margin-bottom: 16px; font-size: 13px; border: 1px solid #d0d7de; border-radius: 6px; " +
+        // Explicit background/color: without these, browsers apply their own
+        // dark-mode default styling to unstyled inputs, which can pair a dark
+        // input background with dark text from this panel's own color rules
+        // and make it unreadable. The whole modal is intentionally light-themed
+        // regardless of the page's color scheme, so its inputs need to match.
+        "background: #fff; color: #24292f;");
+    baseUrlInput.addEventListener("input", () => {
+        draft.baseUrl = baseUrlInput.value.trim();
+    });
+    panel.appendChild(baseUrlInput);
+    const dashboardsHeading = document.createElement("div");
+    dashboardsHeading.textContent = "Jump targets";
+    dashboardsHeading.setAttribute("style", "font-size: 12px; font-weight: 600; margin-bottom: 8px;");
+    panel.appendChild(dashboardsHeading);
+    const rowsContainer = document.createElement("div");
+    panel.appendChild(rowsContainer);
+    const textField = (parent, labelText, value, onInput) => {
+        const wrapper = document.createElement("div");
+        wrapper.setAttribute("style", "margin-bottom: 6px;");
+        const label = document.createElement("label");
+        label.textContent = labelText;
+        label.setAttribute("style", "display: block; font-size: 11px; color: #57606a; margin-bottom: 2px;");
+        const input = document.createElement("input");
+        input.type = "text";
+        input.value = value;
+        input.setAttribute("style", "display: block; width: 100%; box-sizing: border-box; padding: 4px 6px; " +
+            "font-size: 12px; border: 1px solid #d0d7de; border-radius: 4px; " +
+            "background: #fff; color: #24292f;");
+        input.addEventListener("input", () => onInput(input.value));
+        wrapper.appendChild(label);
+        wrapper.appendChild(input);
+        parent.appendChild(wrapper);
+    };
+    const VAR_FIELDS = [
+        ["repo", "Repo name"],
+        ["org", "Org/owner"],
+        ["repoFullName", "Repo full name (org/repo)"],
+        ["branch", "Branch"],
+        ["prNumber", "PR number"],
+        ["workflowName", "Workflow file"],
+        ["runnerName", "Runner"],
+        ["runnerGroupName", "Runner group"],
+        ["runId", "Workflow run ID"],
+        ["jobId", "Job ID"],
+        ["serverUrl", "GitHub server URL"],
+        ["apiUrl", "GitHub API URL"],
+    ];
+    const renderRows = () => {
+        rowsContainer.innerHTML = "";
+        draft.dashboards.forEach((target, index) => {
+            const row = document.createElement("div");
+            row.setAttribute("style", "border: 1px solid #d0d7de; border-radius: 6px; padding: 10px; margin-bottom: 10px; position: relative;");
+            const removeButton = document.createElement("button");
+            removeButton.type = "button";
+            removeButton.textContent = "Remove";
+            removeButton.setAttribute("style", "position: absolute; top: 8px; right: 8px; background: none; border: none; " +
+                "color: #cf222e; font-size: 11px; cursor: pointer;");
+            removeButton.addEventListener("click", () => {
+                draft.dashboards.splice(index, 1);
+                renderRows();
+            });
+            row.appendChild(removeButton);
+            const typeLabel = document.createElement("label");
+            typeLabel.textContent = "Target type";
+            typeLabel.setAttribute("style", "display: block; font-size: 11px; color: #57606a; margin-bottom: 2px;");
+            row.appendChild(typeLabel);
+            const typeSelect = document.createElement("select");
+            typeSelect.setAttribute("style", "display: block; width: 100%; box-sizing: border-box; padding: 4px 6px; " +
+                "margin-bottom: 6px; font-size: 12px; border: 1px solid #d0d7de; border-radius: 4px; " +
+                "background: #fff; color: #24292f;");
+            for (const [value, optionLabel] of [
+                ["dashboard", "Grafana dashboard"],
+                ["trace", "Tempo trace search"],
+                ["link", "Generic URL"],
+            ]) {
+                const option = document.createElement("option");
+                option.value = value;
+                option.textContent = optionLabel;
+                option.selected = target.type === value;
+                typeSelect.appendChild(option);
+            }
+            typeSelect.addEventListener("change", () => {
+                const name = draft.dashboards[index].name;
+                draft.dashboards[index] =
+                    typeSelect.value === "trace"
+                        ? { type: "trace", name, id: "", datasourceUid: "", query: "" }
+                        : typeSelect.value === "link"
+                            ? { type: "link", name, id: "", urlTemplate: "" }
+                            : { type: "dashboard", name, uid: "", slug: "", varNames: {} };
+                renderRows();
+            });
+            row.appendChild(typeSelect);
+            textField(row, "Display name", target.name, (value) => {
+                target.name = value;
+            });
+            if (target.type === "trace") {
+                textField(row, "Target ID (unique among your traces; only used to dedupe on export)", target.id, (value) => {
+                    target.id = value.trim();
+                });
+                textField(row, "Tempo datasource UID", target.datasourceUid, (value) => {
+                    target.datasourceUid = value.trim();
+                });
+                textField(row, "TraceQL query (use {{fieldKey}} placeholders, e.g. {{runId}})", target.query, (value) => {
+                    target.query = value;
+                });
+            }
+            else if (target.type === "link") {
+                textField(row, "Target ID (unique among your links; only used to dedupe on export)", target.id, (value) => {
+                    target.id = value.trim();
+                });
+                textField(row, "URL template (use {{fieldKey}} placeholders, e.g. https://example.com/{{repo}})", target.urlTemplate, (value) => {
+                    target.urlTemplate = value;
+                });
+            }
+            else {
+                textField(row, "Dashboard UID", target.uid, (value) => {
+                    target.uid = value.trim();
+                });
+                textField(row, "Dashboard slug", target.slug, (value) => {
+                    target.slug = value.trim();
+                });
+                const varsHeading = document.createElement("div");
+                varsHeading.textContent = "Template variable names (leave blank if not used)";
+                varsHeading.setAttribute("style", "font-size: 11px; color: #57606a; margin: 8px 0 4px;");
+                row.appendChild(varsHeading);
+                for (const [key, label] of VAR_FIELDS) {
+                    textField(row, label, target.varNames[key] ?? "", (value) => {
+                        const trimmed = value.trim();
+                        if (trimmed === "") {
+                            delete target.varNames[key];
+                        }
+                        else {
+                            target.varNames[key] = trimmed;
+                        }
+                    });
+                }
+            }
+            rowsContainer.appendChild(row);
+        });
+    };
+    renderRows();
+    const addButton = document.createElement("button");
+    addButton.type = "button";
+    addButton.textContent = "+ Add jump target";
+    addButton.setAttribute("style", "display: block; width: 100%; padding: 8px; margin-bottom: 16px; " +
+        "background: #f6f8fa; border: 1px dashed #d0d7de; border-radius: 6px; " +
+        "font-size: 12px; cursor: pointer;");
+    addButton.addEventListener("click", () => {
+        draft.dashboards.push({ type: "dashboard", name: "", uid: "", slug: "", varNames: {} });
+        renderRows();
+    });
+    panel.appendChild(addButton);
+    if (repoCtx && (!currentRepoConfig || isConfigured(currentConfig))) {
+        const repoSyncHeading = document.createElement("div");
+        repoSyncHeading.textContent = `Share with ${repoCtx.org}/${repoCtx.repo}`;
+        repoSyncHeading.setAttribute("style", "font-size: 12px; font-weight: 600; margin-bottom: 4px;");
+        panel.appendChild(repoSyncHeading);
+        const repoSyncHelp = document.createElement("p");
+        repoSyncHelp.textContent =
+            `Opens GitHub's own "create file" page for this repo's ${REPO_CONFIG_PATH}, pre-filled - ` +
+                "review and commit (or open a PR) from there. Nothing is written until you do.";
+        repoSyncHelp.setAttribute("style", "margin: 0 0 8px; font-size: 11px; color: #57606a;");
+        panel.appendChild(repoSyncHelp);
+        const repoSyncRow = document.createElement("div");
+        repoSyncRow.setAttribute("style", "display: flex; gap: 8px; margin-bottom: 16px;");
+        const secondaryButtonStyle = "flex: 1; padding: 6px 10px; font-size: 11px; border-radius: 6px; border: 1px solid #d0d7de; " +
+            "background: #f6f8fa; color: #24292f; cursor: pointer;";
+        const openCreateFileTab = (content) => {
+            void resolveDefaultBranch(repoCtx.org, repoCtx.repo).then((branch) => {
+                const url = buildCreateFileUrl(repoCtx.org, repoCtx.repo, branch, REPO_CONFIG_PATH, content);
+                window.open(url, "_blank");
+            });
+        };
+        if (!currentRepoConfig) {
+            const templateButton = document.createElement("button");
+            templateButton.type = "button";
+            templateButton.textContent = "📄 Create repo config template";
+            templateButton.setAttribute("style", secondaryButtonStyle);
+            templateButton.addEventListener("click", () => openCreateFileTab(REPO_CONFIG_TEMPLATE));
+            repoSyncRow.appendChild(templateButton);
+        }
+        if (isConfigured(currentConfig)) {
+            // Exports the saved config, not unsaved edits in this draft - if you've
+            // just added a dashboard, Save first so the export includes it.
+            const exportButton = document.createElement("button");
+            exportButton.type = "button";
+            exportButton.textContent = "⬆️ Export my config to repo";
+            exportButton.setAttribute("style", secondaryButtonStyle);
+            exportButton.addEventListener("click", () => {
+                const merged = mergeConfigsForExport(currentRepoConfig, currentConfig);
+                openCreateFileTab(configToYamlLite(merged));
+            });
+            repoSyncRow.appendChild(exportButton);
+        }
+        // The outer `if` above already guarantees at least one of the two
+        // buttons was added.
+        panel.appendChild(repoSyncRow);
+    }
+    const actions = document.createElement("div");
+    actions.setAttribute("style", "display: flex; justify-content: flex-end; gap: 8px;");
+    const cancelButton = document.createElement("button");
+    cancelButton.type = "button";
+    cancelButton.textContent = "Cancel";
+    cancelButton.setAttribute("style", "padding: 6px 14px; font-size: 12px; border-radius: 6px; border: 1px solid #d0d7de; " +
+        "background: #fff; cursor: pointer;");
+    cancelButton.addEventListener("click", () => document.body.removeChild(overlay));
+    actions.appendChild(cancelButton);
+    const saveButton = document.createElement("button");
+    saveButton.type = "button";
+    saveButton.textContent = "Save";
+    saveButton.setAttribute("style", "padding: 6px 14px; font-size: 12px; border-radius: 6px; border: none; " +
+        "background: #1f883d; color: #fff; cursor: pointer;");
+    saveButton.addEventListener("click", () => {
+        void (async () => {
+            const cleaned = normalizeConfig(draft);
+            await saveConfig(cleaned);
+            currentConfig = cleaned;
+            document.body.removeChild(overlay);
+            checkLocation(true);
+        })();
+    });
+    actions.appendChild(saveButton);
+    panel.appendChild(actions);
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+}
+/**
+ * Applies this button's look for the given placement - GitHub's own Primer
+ * utility classes when sitting inline among GitHub's real toolbar buttons
+ * (the same classes github-to-graphite-button uses on the exact same
+ * gh-header-actions toolbar, so this matches GitHub's own buttons rather than
+ * standing out), or this script's own custom-colored inline style when
+ * floating free of any GitHub styling context.
+ */
+function styleJumpButton(el, variant, kind) {
+    if (variant === "inline") {
+        el.setAttribute("class", "Button--secondary Button--small Button");
+        return;
+    }
+    el.setAttribute("style", kind === "solo" ? SOLO_BUTTON_STYLE : kind === "toggle" ? TOGGLE_STYLE : BUTTON_STYLE);
+}
+/**
+ * Fills a container (the floating button's own div, or an inline wrapper
+ * dropped into GitHub's toolbar) with the jump button/menu for a context -
+ * shared between renderJumpButton() and renderInlineButton() so the two
+ * placements can't drift out of sync on click behavior, only on styling (see
+ * styleJumpButton()).
+ */
+function populateJumpContainer(container, context, active, variant) {
+    container.innerHTML = "";
+    if (active.length === 0) {
+        const setupButton = document.createElement("button");
+        setupButton.type = "button";
+        setupButton.textContent = "⚙️ Set up links";
+        styleJumpButton(setupButton, variant, "solo");
+        setupButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            openConfigModal(repoContextForJump(context));
+        });
+        container.appendChild(setupButton);
+        return;
+    }
+    const [primary, ...rest] = active;
+    const label = labelForContext(context);
+    const jumpLink = document.createElement("a");
+    jumpLink.setAttribute("href", buildJumpUrl(primary.baseUrl, primary.dashboard, context));
+    jumpLink.setAttribute("target", "_blank");
+    jumpLink.setAttribute("rel", "noopener noreferrer");
+    styleJumpButton(jumpLink, variant, "primary");
+    jumpLink.textContent =
+        active.length > 1 ? `${label} (${targetDisplayName(primary.dashboard)}) ↗️` : `${label} ↗️`;
+    container.appendChild(jumpLink);
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.textContent = "▾";
+    styleJumpButton(toggle, variant, "toggle");
+    toggle.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const items = [
+            ...active.map(({ baseUrl, dashboard }) => ({
+                label: `↗️ ${targetDisplayName(dashboard)}`,
+                onClick: () => window.open(buildJumpUrl(baseUrl, dashboard, context), "_blank"),
+            })),
+            { label: "⚙️ Edit jump targets...", onClick: () => openConfigModal(repoContextForJump(context)) },
+        ];
+        openMenu(container, items);
+    });
+    container.appendChild(toggle);
+    // rest is intentionally unused beyond being included in `active` above;
+    // named for clarity when reading the destructure at a glance.
+    void rest;
+}
+/**
+ * GitHub's own PR header action row - the same selector
+ * github-to-graphite-button already anchors "Graphite ↗️" to, confirmed
+ * stable there. Unlike the rest of GitHub's Actions/PR pages (see the module
+ * comment above CONTAINER_ID), a PR's header toolbar is NOT one of Primer
+ * React's hashed CSS-module classes, so it's safe to hardcode here too.
+ * Nothing equivalent is known for the other context kinds (branch/workflow/
+ * run/runner/runnerGroup all live on the Actions tab, not a PR), so those
+ * keep only the floating button below.
+ */
+const PR_TOOLBAR_SELECTOR = '[class^="gh-header-actions"]';
+const INLINE_CONTAINER_ID = "grafanaJumpInlineContainer";
+/**
+ * Injects the jump button/menu directly into GitHub's own PR header toolbar,
+ * alongside GitHub's real action buttons - mirroring how
+ * github-to-graphite-button/graphite-to-github-button inject theirs. Returns
+ * whether it actually placed something there; false (off a PR page, or the
+ * toolbar hasn't rendered into the DOM yet on this pass) means the caller
+ * should fall back to the floating button instead.
+ */
+function renderInlineButton(context, active) {
+    if (context.kind !== "pr")
+        return false;
+    const toolbar = document.querySelector(PR_TOOLBAR_SELECTOR);
+    if (!toolbar)
+        return false;
+    const container = document.getElementById(INLINE_CONTAINER_ID) ?? document.createElement("span");
+    const alreadyMounted = container.isConnected;
+    container.id = INLINE_CONTAINER_ID;
+    container.setAttribute("style", "position: relative; display: inline-flex; gap: 4px; margin-left: 8px;");
+    populateJumpContainer(container, context, active, "inline");
+    if (!alreadyMounted) {
+        toolbar.appendChild(container);
+    }
+    return true;
+}
+/**
+ * Renders the jump button for a context, inline in GitHub's own PR toolbar
+ * when possible, else as the floating fallback. Returns whether this needs
+ * retrying on a later call - true only for a PR context whose toolbar hasn't
+ * rendered into the DOM yet (GitHub mounts it asynchronously after the URL
+ * settles), so the floating button is also shown as a visible stand-in for
+ * that gap rather than nothing at all.
+ */
+function renderJumpButton(context) {
+    const floating = document.getElementById(CONTAINER_ID);
+    if (!context) {
+        floating?.remove();
+        document.getElementById(INLINE_CONTAINER_ID)?.remove();
+        return false;
+    }
+    const active = activeDashboards(currentConfig, currentRepoConfig, context);
+    let toolbarPending = false;
+    if (context.kind === "pr") {
+        if (renderInlineButton(context, active)) {
+            // Placed inline in GitHub's own toolbar - no floating button needed too.
+            floating?.remove();
+            return false;
+        }
+        toolbarPending = true;
+    }
+    else {
+        document.getElementById(INLINE_CONTAINER_ID)?.remove();
+    }
+    const container = floating ?? document.createElement("div");
+    container.id = CONTAINER_ID;
+    container.setAttribute("style", "position: fixed; bottom: 16px; right: 16px; z-index: 2147483647;");
+    populateJumpContainer(container, context, active, "floating");
+    if (!floating) {
+        document.body.appendChild(container);
+    }
+    return toolbarPending;
+}
+let lastLocationKey;
+// True while the current PR page's toolbar hasn't been found yet - see
+// renderJumpButton()'s return value. Keeps checkLocation() re-rendering on
+// every subsequent DOM mutation (instead of only on a pathname/search
+// change) until the inline button lands, then falls quiet again.
+let inlineButtonPending = false;
+function checkLocation(force = false) {
+    const { pathname, search } = window.location;
+    const locationKey = `${pathname}${search}`;
+    const locationChanged = force || locationKey !== lastLocationKey;
+    if (!locationChanged && !inlineButtonPending)
+        return;
+    lastLocationKey = locationKey;
+    const context = resolveJumpContext(pathname, search);
+    inlineButtonPending = renderJumpButton(context);
+    if (!locationChanged)
+        return;
+    const repoCtx = context ? repoContextForJump(context) : null;
+    const repoKey = repoCtx ? `${repoCtx.org}/${repoCtx.repo}` : undefined;
+    if (repoKey === currentRepoConfigKey)
+        return;
+    currentRepoConfigKey = repoKey;
+    currentRepoConfig = null;
+    if (repoCtx) {
+        void fetchRepoConfig(repoCtx.org, repoCtx.repo).then((config) => {
+            // Guard against a slow response landing after the user has already
+            // navigated to a different repo (or one with no repo context at all).
+            if (currentRepoConfigKey !== repoKey)
+                return;
+            currentRepoConfig = config;
+            checkLocation(true);
+        });
+    }
+}
+// Guarded so that requiring the compiled output under Node (see the test-only
+// export hook below) never touches DOM/GM/browser globals - `document` always
+// exists in the real userscript context, so this runs unconditionally there.
+if (typeof document !== "undefined") {
+    void (async () => {
+        currentConfig = await loadConfig();
+        const routeChangeObserver = new MutationObserver(() => checkLocation());
+        routeChangeObserver.observe(document.body, { childList: true, subtree: true });
+        checkLocation();
+        void checkForUpdate();
+    })();
+}
+// ---------------------------------------------------------------------------
+// Test-only export hook. `module` is a variable Node's CommonJS loader injects
+// into every required file's scope (e.g. when test/grafana-jump.test.js
+// `require()`s the compiled dist/index.js) - it does not exist in a browser
+// script context, so `typeof module !== "undefined"` is false there and this
+// is a no-op, never risking a ReferenceError on github.com. The `NodeModule`
+// type for `module` itself comes from @types/node, already pulled in
+// transitively via @types/greasemonkey; no explicit `declare` needed here.
+// ---------------------------------------------------------------------------
+if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+        parsePrContext,
+        parseBranchContext,
+        parseRunnerContext,
+        parseRunnerGroupContext,
+        parseWorkflowContext,
+        parseRunContext,
+        resolveJumpContext,
+        extractBranchFromQuery,
+        contextFields,
+        requiredFields,
+        applicableDashboards,
+        repoContextForJump,
+        activeDashboards,
+        mergeConfigsForExport,
+        buildDashboardUrl,
+        renderTemplate,
+        buildTraceExploreUrl,
+        buildJumpUrl,
+        labelForContext,
+        defaultConfig,
+        normalizeConfig,
+        isConfigured,
+        parseYamlLite,
+        configToYamlLite,
+        buildCreateFileUrl,
+        isVersionUpdate,
+    };
+}
+//# sourceMappingURL=index.js.map
