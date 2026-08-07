@@ -1094,9 +1094,26 @@ const defaultBranchCache = new Map<string, Promise<string>>();
  * GitHub's "create/edit file" web UI is addressed by branch name, not by the
  * "HEAD" alias fetchRepoConfig() above gets to use (that alias only exists
  * for raw.githubusercontent.com content URLs) - so building a link into that
- * UI needs the actual default branch name. Falls back to "main" on any
- * failure; worst case the resulting link's branch segment is wrong and
- * GitHub's own UI surfaces that, rather than anything failing silently.
+ * UI needs the actual default branch name.
+ *
+ * Deliberately does NOT call the `api.github.com` REST API: that's a
+ * different host than github.com, so the browser's github.com session
+ * cookie isn't sent along, and an unauthenticated request to it 404s for any
+ * private repo (GitHub hides private-repo existence from anonymous
+ * requests) - silently falling back to "main", which is wrong whenever a
+ * private repo's actual default branch isn't literally that (confirmed
+ * broken this way against a real private repo). Fetching the repo's own
+ * `https://github.com/<org>/<repo>` page instead reuses the same
+ * already-authenticated browser session the user is Browsing with (GitHub is
+ * itself same-origin/same-session as the page this script runs on), and
+ * every repo page embeds its `defaultBranch` in a JSON blob for its own
+ * React app to read - this just reads the same value out of the response
+ * text via regex rather than a full JSON parse, since which specific React
+ * route embeds it (and under what surrounding JSON shape) varies page to
+ * page, but the `"defaultBranch":"<name>"` substring itself does not. Falls
+ * back to "main" only if that pattern isn't found at all; worst case the
+ * resulting link's branch segment is wrong and GitHub's own UI surfaces
+ * that, rather than anything failing silently.
  */
 function resolveDefaultBranch(org: string, repo: string): Promise<string> {
   const key = `${org}/${repo}`;
@@ -1106,18 +1123,10 @@ function resolveDefaultBranch(org: string, repo: string): Promise<string> {
   const promise = new Promise<string>((resolve) => {
     GM.xmlHttpRequest({
       method: "GET",
-      url: `https://api.github.com/repos/${encodeURIComponent(org)}/${encodeURIComponent(repo)}`,
+      url: `https://github.com/${encodeURIComponent(org)}/${encodeURIComponent(repo)}`,
       onload: (response: { status: number; responseText: string }) => {
-        try {
-          const data: unknown = JSON.parse(response.responseText);
-          const branch =
-            typeof data === "object" && data !== null && typeof (data as { default_branch?: unknown }).default_branch === "string"
-              ? (data as { default_branch: string }).default_branch
-              : "";
-          resolve(branch || "main");
-        } catch {
-          resolve("main");
-        }
+        const match = response.responseText.match(/"defaultBranch":"([^"]+)"/);
+        resolve(match ? match[1] : "main");
       },
       onerror: () => resolve("main"),
     });
