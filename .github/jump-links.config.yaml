@@ -1,96 +1,88 @@
-# Config for the "GitHub Actions => Grafana jump button" userscript
-# (packages/github-actions-grafana-jump). Gives every contributor to this
-# repo the same jump targets without each of them configuring the userscript
-# by hand. A contributor's own personal config (set via the userscript's own
-# "Set up links" panel) always takes priority over this file for any page it
-# covers - this is only a fallback for pages nobody has personally
-# configured. Bootstrap one of these for your own repo via the userscript's
-# config panel -> "Create repo config template" / "Export my config to repo".
+# Config for the "GitHub jump links" userscript
+# (packages/github-actions-grafana-jump). Gives every contributor to this repo
+# the same jump links without each of them configuring the userscript by hand.
+# A contributor's own personal config (set via the userscript's own "Set up
+# links" panel) always takes priority over this file for any page it covers -
+# this is only a fallback for pages nobody has personally configured. Bootstrap
+# one of these for your own repo via the userscript's config panel -> "Create
+# repo config template" / "Export my links to repo".
 #
-# This repo doesn't actually run a Grafana instance - the values below are
-# illustrative placeholders, kept here purely to document and exercise the
+# This repo doesn't actually run a Grafana instance or a wiki - the links below
+# are illustrative placeholders, kept here purely to document and exercise the
 # file format the userscript reads.
 #
-# baseUrl: your Grafana instance's base URL (no trailing slash). Only used by
-#   type: dashboard and type: trace entries - a type: link entry's URL is
-#   already complete on its own.
-# dashboards: one entry per jump target. Each entry is a Grafana dashboard
-#   link (type: dashboard), a Tempo trace search (type: trace), or a link to
-#   any other URL (type: link). A target only shows up as a jump target on
-#   pages that provide every field it's configured to use - not all fields
-#   are available on every page (a branch's Actions page has no workflow run
-#   ID, for example), so different targets naturally show up on different
-#   pages.
+# pages: one entry per kind of GitHub page, listing the links to show there. A
+#   link only ever shows up on the page it's listed under - there is no "type"
+#   and no inference. Every link is just a URL.
 #
-#   Available fields (named after GitHub Actions' own `github` context, as
-#   far as a page's URL actually provides an equivalent value): repo, org,
-#   repoFullName (org/repo), branch, prNumber, workflowName, runnerName,
-#   runnerGroupName, runId, jobId, serverUrl, apiUrl.
+#   page  - which kind of GitHub page these links belong on, one of the names
+#           listed below.
+#   links - name (the button's text, yours to word however you like) and url
+#           (the full URL to open, with `{{fieldKey}}` placeholders filled in
+#           from the current page). A link whose URL uses a field its page
+#           doesn't provide is skipped rather than shown with a broken URL, so
+#           a typo'd placeholder shows up as a missing button.
 #
-#   type: dashboard
-#     name     - display label for the jump button/menu.
-#     uid      - the dashboard's UID (Grafana dashboard settings -> JSON
-#                Model, or the segment right after /d/ in the dashboard's
-#                URL).
-#     slug     - the URL slug right after the uid in the dashboard's URL.
-#     varNames - which of this dashboard's template variables (if any) to
-#                preset from the current GitHub page, keyed by one of the
-#                fields above. Leave a field out if the dashboard doesn't use
-#                that kind of filter.
+#   Page names, and the fields each one provides (named after GitHub Actions'
+#   own `github` context, as far as a page's URL provides an equivalent value):
+#     repoHome: repo, org, repoFullName, serverUrl, apiUrl
+#     repoFile: repo, org, repoFullName, branch, serverUrl, apiUrl
+#     pr: repo, org, repoFullName, prNumber, serverUrl, apiUrl
+#     prList: repo, org, repoFullName, prNumber, serverUrl, apiUrl
+#     branchList: repo, org, repoFullName, branch, serverUrl, apiUrl
+#     actionsList: repo, org, repoFullName, serverUrl, apiUrl
+#     branch: repo, org, repoFullName, branch, serverUrl, apiUrl
+#     workflow: repo, org, repoFullName, workflowName, serverUrl, apiUrl
+#     run: repo, org, repoFullName, runId, serverUrl, apiUrl
+#     job: repo, org, repoFullName, runId, jobId, serverUrl, apiUrl
+#     runner: repo, org, repoFullName, runnerName, serverUrl, apiUrl
+#     runnerGroup: org, runnerGroupName, serverUrl, apiUrl
 #
-#   type: trace
-#     name          - display label for the jump button/menu.
-#     id            - any string unique among your trace/link targets; used
-#                      only to dedupe when exporting/merging this file, not
-#                      shown anywhere.
-#     datasourceUid - the Tempo datasource's UID in Grafana (Connections ->
-#                     Data sources -> your Tempo source -> the "uid" in its
-#                     URL or Settings JSON).
-#     query         - a TraceQL query with `{{fieldKey}}` placeholders (any
-#                     field above) filled in from the current GitHub page -
-#                     adjust the attribute names below (e.g.
-#                     resource.github.run_id) to match however your own
-#                     traces are tagged.
-#
-#   type: link
-#     name        - display label for the jump button/menu.
-#     id          - any string unique among your trace/link targets; same
-#                    role as a trace target's id.
-#     urlTemplate - a full URL with `{{fieldKey}}` placeholders (any field
-#                   above) filled in from the current GitHub page - for
-#                   linking anywhere, not just Grafana.
-baseUrl: https://grafana.example.com
-dashboards:
-  - type: dashboard
-    name: Workflow runs for this repo
-    uid: ci-overview-uid
-    slug: ci-overview
-    varNames:
-      repo: repository
-  - type: dashboard
-    name: Workflow runs on this runner
-    uid: ci-overview-uid
-    slug: ci-overview
-    varNames:
-      runnerName: runner_name
-  - type: dashboard
-    name: Workflow runs for this branch
-    uid: ci-overview-uid
-    slug: ci-overview
-    varNames:
-      repo: repository
-      branch: branch
-  - type: trace
-    name: Trace for this workflow run
-    id: workflow-run-trace
-    datasourceUid: tempo-datasource-uid
-    query: '{resource.github.run_id="{{runId}}"}'
-  - type: trace
-    name: Span for this job
-    id: workflow-job-span
-    datasourceUid: tempo-datasource-uid
-    query: '{resource.github.run_id="{{runId}}" && resource.github.job_id="{{jobId}}"}'
-  - type: link
-    name: Runbook for this repo
-    id: repo-runbook
-    urlTemplate: 'https://runbooks.example.com/{{repoFullName}}'
+#   Which GitHub page each name means:
+#     repoHome    - the repo's landing page
+#     repoFile    - one file being viewed at some ref
+#     pr          - a pull request (any of its sub-tabs)
+#     prList      - the pull request list; links show up per row, and prNumber
+#                   is that row's own PR
+#     branchList  - the branch list; links show up per row, and branch is that
+#                   row's own branch
+#     actionsList - the Actions tab
+#     branch      - the Actions tab filtered to one branch (?query=branch:...)
+#     workflow    - one workflow's own runs page
+#     run         - one workflow run
+#     job         - one job within a workflow run
+#     runner      - a self-hosted runner's settings page
+#     runnerGroup - an org's runner group settings page
+pages:
+  - page: repoHome
+    links:
+      - name: Runbook
+        url: https://runbooks.example.com/{{repoFullName}}
+  - page: pr
+    links:
+      - name: CI for this PR
+        url: https://grafana.example.com/d/ci-overview-uid/ci-overview?var-repository={{repo}}&var-pr={{prNumber}}
+  - page: prList
+    links:
+      - name: CI
+        url: https://grafana.example.com/d/ci-overview-uid/ci-overview?var-repository={{repo}}&var-pr={{prNumber}}
+  - page: branch
+    links:
+      - name: CI for this branch
+        url: https://grafana.example.com/d/ci-overview-uid/ci-overview?var-repository={{repo}}&var-branch={{branch}}
+  - page: branchList
+    links:
+      - name: CI
+        url: https://grafana.example.com/d/ci-overview-uid/ci-overview?var-repository={{repo}}&var-branch={{branch}}
+  - page: run
+    links:
+      - name: Trace for this run
+        url: https://grafana.example.com/explore?schemaVersion=1&orgId=1&panes=%7B%22jump%22%3A%7B%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22%7Bresource.github.run_id%3D%5C%22{{runId}}%5C%22%7D%22%7D%5D%7D%7D
+  - page: job
+    links:
+      - name: Span for this job
+        url: https://grafana.example.com/explore?schemaVersion=1&orgId=1&panes=%7B%22jump%22%3A%7B%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22%7Bresource.github.run_id%3D%5C%22{{runId}}%5C%22%20%26%26%20resource.github.job_id%3D%5C%22{{jobId}}%5C%22%7D%22%7D%5D%7D%7D
+  - page: runner
+    links:
+      - name: Runs on this runner
+        url: https://grafana.example.com/d/ci-overview-uid/ci-overview?var-runner_name={{runnerName}}
