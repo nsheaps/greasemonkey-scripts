@@ -1,6 +1,6 @@
 {
   "name": "@nsheaps/gm-github-actions-grafana-jump",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "main": "dist/index.js",
   "greasyforkPublish": true,
   "scripts": {
