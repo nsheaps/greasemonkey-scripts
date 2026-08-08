@@ -8,8 +8,6 @@
 // stale; the package's own "test" script does this for you.
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
 
 const {
   parseRepoHomeContext,
@@ -825,21 +823,56 @@ test("the repo config template parses into a usable config", () => {
   }
 });
 
-test("this repo's own checked-in jump-links config parses into a usable config", () => {
-  // Guards the documented example against drifting out of the format the
-  // parser actually reads - it's the one config file in this repo that a real
-  // contributor's browser will fetch.
-  const configPath = path.join(__dirname, "..", "..", "..", ".github", "jump-links.config.yaml");
-  const config = normalizeConfig(parseYamlLite(fs.readFileSync(configPath, "utf8")));
-  assert.ok(config.pages.length > 0, "checked-in config should define at least one page");
-  for (const entry of config.pages) {
-    assert.deepEqual(applicableLinks(config, sampleContext(entry.page)), entry.links);
-  }
-  assert.match(
-    fs.readFileSync(configPath, "utf8"),
-    new RegExp(pageFieldsReference().split("\n")[0].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
-    "checked-in config's header comment should carry the generated page/field reference",
+// A stand-in for the `.github/jump-links.config.yaml` a repo would check in:
+// a header comment block (including the generated page/field reference the
+// template ships with), then a few pages' worth of links using placeholders.
+const CHECKED_IN_CONFIG_FIXTURE = [
+  '# Config for the "GitHub jump links" userscript.',
+  "#",
+  "#   Page names, and the fields each one provides:",
+  pageFieldsReference(),
+  "",
+  "pages:",
+  "  - page: pr",
+  "    links:",
+  "      - name: CI dashboard",
+  "        url: https://grafana.example.com/d/abc123/ci-overview?var-repo={{repoFullName}}&var-pr={{prNumber}}",
+  "      - name: Runbook",
+  "        url: https://runbooks.example.com/ci",
+  "  - page: job",
+  "    links:",
+  "      - name: Job trace",
+  '        url: https://grafana.example.com/explore?left=%7B%22query%22:%22%7Bjob_id%3D%5C%22{{jobId}}%5C%22%7D%22%7D',
+  "  - page: repoHome",
+  "    links:",
+  "      - name: Service overview",
+  "        url: https://grafana.example.com/d/def456/service?var-repo={{repoFullName}}",
+].join("\n");
+
+test("a repo config written the way the docs describe parses into a usable config", () => {
+  // Guards the documented file format against drifting out of what the parser
+  // actually reads - this is the shape of the file a real contributor's
+  // browser fetches out of a repo's .github/ directory.
+  const config = normalizeConfig(parseYamlLite(CHECKED_IN_CONFIG_FIXTURE));
+
+  assert.deepEqual(
+    config.pages.map((entry) => entry.page),
+    // normalizeConfig puts the pages back in JUMP_PAGE_KINDS order, not the
+    // order they happen to be written in the file.
+    ["repoHome", "pr", "job"],
+    "header comments and blank lines shouldn't leak into the parsed pages",
   );
+  for (const entry of config.pages) {
+    assert.equal(isJumpPageKind(entry.page), true);
+    assert.ok(entry.links.length > 0);
+    // Every link must actually show up on the page it's filed under, with all
+    // of its placeholders filled in from that page's own fields.
+    assert.deepEqual(applicableLinks(config, sampleContext(entry.page)), entry.links);
+    for (const link of entry.links) {
+      const url = renderTemplate(link.url, contextFields(sampleContext(entry.page)));
+      assert.doesNotMatch(url, /\{\{\w+\}\}/, `${link.name} left a placeholder unfilled`);
+    }
+  }
 });
 
 // ---------------------------------------------------------------------------
