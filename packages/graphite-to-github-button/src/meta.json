@@ -7,7 +7,5 @@
   "run-at": "document-start",
   "icon": "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==",
   "grant": "none",
-  "license": "MIT",
-  "downloadURL": "https://raw.githubusercontent.com/nsheaps/greasemonkey-scripts/latest/packages/graphite-to-github-button/dist/script.user.js",
-  "updateURL": "https://raw.githubusercontent.com/nsheaps/greasemonkey-scripts/latest/packages/graphite-to-github-button/dist/script.user.js"
+  "license": "MIT"
 }

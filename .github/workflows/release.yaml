@@ -2,8 +2,9 @@ name: Release
 
 # Per-package release pipeline. Each publishable package (opted in via
 # `"greasyforkPublish": true` in its own package.json) owns its version in its
-# own package.json and its own CHANGELOG.md; internal-only packages (e.g.
-# github-actions-grafana-jump) are simply not opted in and never touched here.
+# own package.json and its own CHANGELOG.md; packages that are not opted in
+# (e.g. the `template`/`_template` scaffolding packages) are simply never
+# touched here.
 #
 # On a pull request: PREVIEW ONLY. Computes the patch bump each changed package
 # would receive on merge and posts it as a sticky comment. Nothing is committed
