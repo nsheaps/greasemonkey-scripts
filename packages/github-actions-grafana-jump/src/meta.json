@@ -8,7 +8,5 @@
   "icon": "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==",
   "grant": ["GM.setValue", "GM.getValue", "GM.xmlHttpRequest"],
   "connect": ["raw.githubusercontent.com", "github.com"],
-  "license": "MIT",
-  "downloadURL": "https://raw.githubusercontent.com/nsheaps/greasemonkey-scripts/latest/packages/github-actions-grafana-jump/dist/script.user.js",
-  "updateURL": "https://raw.githubusercontent.com/nsheaps/greasemonkey-scripts/latest/packages/github-actions-grafana-jump/dist/script.user.js"
+  "license": "MIT"
 }

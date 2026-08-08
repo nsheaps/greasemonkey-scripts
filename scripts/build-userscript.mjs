@@ -19,7 +19,14 @@
 // Usage: node ../../scripts/build-userscript.mjs   (run from a package root)
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
+
+// Where the released userscripts are read from. Kept here, in the one script
+// that renders every package's header, so the repo's own coordinates live in a
+// single place instead of being hand-typed into each package's meta.json (where
+// a package directory rename would silently leave a stale URL behind).
+const REPO_ORG = "nsheaps";
+const REPO_NAME = "greasemonkey-scripts";
 
 const pkgDir = process.cwd();
 const readJson = (relPath) =>
@@ -37,6 +44,21 @@ if ("version" in meta) {
   );
 }
 
+// Same reasoning as 'version': the download/update URLs are derived from the
+// package's own directory name, so a meta.json still declaring them is a second
+// source that would silently drift on a directory rename.
+for (const key of ["downloadURL", "updateURL"]) {
+  if (key in meta) {
+    throw new Error(
+      `src/meta.json must not declare a '${key}' key - @downloadURL/@updateURL are derived from the package directory name`
+    );
+  }
+}
+
+// The last segment of the package root is the directory name under packages/,
+// which is the path GreasyFork and Tampermonkey fetch the built script from.
+const scriptUrl = `https://raw.githubusercontent.com/${REPO_ORG}/${REPO_NAME}/latest/packages/${basename(pkgDir)}/dist/script.user.js`;
+
 // Always emit whatever package.json currently holds. Between releases that is
 // the last released version, which is honest for a local build, and on a
 // release build release-it has already bumped it to the new version.
@@ -44,6 +66,8 @@ const entries = [
   ["name", meta.name],
   ["version", pkg.version],
   ...Object.entries(meta).filter(([key]) => key !== "name"),
+  ["downloadURL", scriptUrl],
+  ["updateURL", scriptUrl],
 ];
 
 // Flatten array values (e.g. multiple @match rules) into one line per value,
