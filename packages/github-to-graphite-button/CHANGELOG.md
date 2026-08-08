@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.8](https://github.com/nsheaps/greasemonkey-scripts/compare/release/last-run...0.3.8) (2026-08-08)
+
+### Refactoring
+
+* **build:** derive userscript [@download](https://github.com/download)URL/[@update](https://github.com/update)URL from the package directory ([#48](https://github.com/nsheaps/greasemonkey-scripts/issues/48)) ([24cedcd](https://github.com/nsheaps/greasemonkey-scripts/commit/24cedcdedee9559ba54e9a7277851bc915027924))
+
 ## [0.3.7](https://github.com/nsheaps/greasemonkey-scripts/compare/release/last-run...0.3.7) (2026-08-07)
 
 ## [0.3.5](https://github.com/nsheaps/greasemonkey-scripts/compare/release/last-run...0.3.5) (2026-08-06)
