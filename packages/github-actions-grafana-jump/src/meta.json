@@ -1,6 +1,6 @@
 {
   "name": "GitHub Actions => Grafana jump button",
-  "description": "Add a button on github.com Actions pages (PR checks, branch-filtered runs, a single workflow's runs, and runner detail pages) that jumps to a matching Grafana dashboard, Tempo trace, or any other URL you configure yourself",
+  "description": "Add your own jump links to github.com pages (repo home, file views, pull requests and the PR list, the branch list, and the Actions tab down to a single job) - each link is a name and a URL you write yourself, with values from the current page filled in",
   "author": "Nathan Heaps",
   "namespace": "https://www.github.com",
   "match": ["http*://www.github.com/*", "http*://github.com/*"],
