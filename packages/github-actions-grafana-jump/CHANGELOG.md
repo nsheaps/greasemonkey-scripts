@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.7](https://github.com/nsheaps/greasemonkey-scripts/compare/release/last-run...0.2.7) (2026-08-08)
+
+### ⚠ BREAKING CHANGES
+
+* **github-actions-grafana-jump:** page-based jump links - every entry is just a name and a URL (#45)
+
+### Features
+
+* **github-actions-grafana-jump:** page-based jump links - every entry is just a name and a URL ([#45](https://github.com/nsheaps/greasemonkey-scripts/issues/45)) ([7e4096d](https://github.com/nsheaps/greasemonkey-scripts/commit/7e4096d587b7acea0333a401b6b93ef95830ac3b))
+
+### Bug Fixes
+
+* broken yarn install (TS v7 lockfile mismatch) and private-repo default-branch detection ([#43](https://github.com/nsheaps/greasemonkey-scripts/issues/43)) ([55ed88c](https://github.com/nsheaps/greasemonkey-scripts/commit/55ed88cf3b69d60c94d6866b1d9524806b626f91)), closes [#42](https://github.com/nsheaps/greasemonkey-scripts/issues/42)
+
 ## [0.2.4](https://github.com/nsheaps/greasemonkey-scripts/compare/release/last-run...0.2.4) (2026-08-06)
 
 ## [0.2.2](https://github.com/nsheaps/greasemonkey-scripts/compare/release/last-run...0.2.2) (2026-08-06)
