@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.10](https://github.com/nsheaps/greasemonkey-scripts/compare/release/last-run...0.2.10) (2026-08-10)
+
+### Features
+
+* **github-actions-grafana-jump:** read a repo's jump-links config at the ref you're looking at ([#51](https://github.com/nsheaps/greasemonkey-scripts/issues/51)) ([c052cb5](https://github.com/nsheaps/greasemonkey-scripts/commit/c052cb5838a84a41e699c228f5277d35164641e7))
+
 ## [0.2.9](https://github.com/nsheaps/greasemonkey-scripts/compare/release/last-run...0.2.9) (2026-08-08)
 
 ### Refactoring
