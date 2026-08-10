@@ -382,6 +382,12 @@ function parseRepoHomeContext(pathname: string): RepoHomeContext | null {
  * genuinely ambiguous in this URL shape (GitHub doesn't encode the separator),
  * so the first segment after `/blob/` is taken as the branch - which is the
  * whole branch name except on such a branch, where it's the first part of it.
+ * That truncated reading is corrected against the ref GitHub itself resolved
+ * the URL to, read from the page's DOM by scrapeBlobRef() and layered on top of
+ * this result - the same way a run page's DOM-only ref is (see
+ * repoConfigTarget()). This stays the pure, synchronous, always-available
+ * reading, and the one that stands if the DOM has no answer.
+ *
  * Directory views (`/tree/<ref>/...`) are not matched: they're a different
  * page with a different toolbar.
  */
@@ -2095,15 +2101,160 @@ function scrapeRunBranch(context: JumpContext): string | undefined {
   return branchFromRunTreeHref(href, context.org, context.repo) ?? undefined;
 }
 
+// ---------------------------------------------------------------------------
+// Which ref a file view is actually at. `/org/repo/blob/<ref>/<path>` doesn't
+// mark where the ref ends and the path begins, so a ref containing a slash makes
+// the URL genuinely ambiguous: `/blob/nate-ai/generic-grafana-jump/README.md` is
+// equally readable as branch `nate-ai` + path `generic-grafana-jump/README.md`
+// or branch `nate-ai/generic-grafana-jump` + path `README.md`. Only the repo's
+// real ref list settles it, which is why parseRepoFileContext() can't: it takes
+// the first segment, right on any ref without a slash and truncated on one with.
+//
+// GitHub has already done that resolution to render the page, and states the
+// answer twice in the file view's own DOM (both confirmed against live
+// github.com, on a hard load and after a soft navigation that switched refs -
+// both are re-rendered by GitHub's client-side router, so neither goes stale):
+//
+//   <button id="ref-picker-repos-header-ref-selector"
+//           aria-label="nate-ai/generic-grafana-jump branch" ...>
+//   <script type="application/json" data-target="react-app.embeddedData">
+//     ... "refInfo":{"name":"nate-ai/generic-grafana-jump", ...} ...
+//
+// So the ref is read from the page rather than reconstructed from a ref list
+// fetched over the network. That is GitHub's own answer for this exact URL, it
+// costs no requests (so there's nothing to rate-limit and nothing to cache), and
+// it works the same on a private repo - whereas api.github.com is a different
+// host that the browser's github.com session cookie isn't sent to, so listing a
+// private repo's branches there 404s anonymously, the same trap documented on
+// resolveDefaultBranch() above.
+//
+// Whichever source answers, the value is only trusted if it's a valid reading of
+// the URL on screen (see refMatchesBlobPath()), so a value belonging to some
+// other page can't win. When neither source answers - GitHub changes this markup,
+// or it hasn't rendered yet - there's no override and the truncated
+// first-segment reading stands, i.e. exactly today's behavior. Nothing here
+// guesses a ref.
+// ---------------------------------------------------------------------------
+
+const BLOB_REF_SELECTOR = "#ref-picker-repos-header-ref-selector";
+const BLOB_EMBEDDED_DATA_SELECTOR = 'script[type="application/json"][data-target="react-app.embeddedData"]';
+
+/**
+ * The ref name out of the file view's ref-picker button's `aria-label`, which
+ * reads `<full ref name> branch` (or `... tag`), or null if the label isn't in
+ * that shape. Read from the label rather than the button's text because the text
+ * is truncated for display. The name is matched greedily so a ref literally
+ * named `something branch` still yields the whole name.
+ */
+function refNameFromRefSelectorLabel(label: string): string | null {
+  const match = label.match(/^(.+) (?:branch|tag)$/);
+  return match ? match[1] : null;
+}
+
+/**
+ * The ref name out of the file view's embedded React payload, or null if it
+ * isn't in there. Matched by regex rather than parsed as JSON and walked,
+ * because `refInfo` sits under whichever route key the payload happens to be
+ * built around (`payload.codeViewBlobLayoutRoute.refInfo` and
+ * `payload.codeViewLayoutRoute.refInfo` both carry it today) - the same reason
+ * resolveDefaultBranch() regexes for `defaultBranch`. A ref name can contain
+ * characters JSON escapes, so escape sequences are consumed as part of the value
+ * and then decoded, rather than the value being cut short at the first
+ * backslash.
+ */
+function refNameFromEmbeddedData(payloadText: string): string | null {
+  const match = payloadText.match(/"refInfo":\{"name":"((?:[^"\\]|\\.)*)"/);
+  if (!match) return null;
+  try {
+    return JSON.parse(`"${match[1]}"`) as string;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether `ref` is a valid reading of a file view's URL - i.e. some leading run
+ * of the `/`-separated segments after `/blob/`, decoded and rejoined, is exactly
+ * `ref`, with at least one segment left over to be the file path. Returns the
+ * ref when it is and null when it isn't.
+ *
+ * How many segments the ref takes up isn't known ahead of time - that's the
+ * whole ambiguity - so every possible split is tried. A slash inside the ref can
+ * also arrive percent-encoded within a single segment (`/blob/my%2Fbranch/...`,
+ * which parseRepoFileContext() already reads correctly) rather than as a literal
+ * separator, so one segment can contribute more than one part of the name and
+ * the comparison is on the rejoined name rather than segment by segment.
+ *
+ * This is what makes reading the ref out of the DOM safe: a value that doesn't
+ * describe the URL on screen is rejected instead of used. That covers a scraped
+ * value going stale (GitHub re-rendering late during a soft navigation) and the
+ * short-commit-SHA case, where the picker shows an abbreviated SHA that isn't
+ * the full one the URL carries - in both cases there's no override and the
+ * first-segment reading stands, which for a SHA URL is already the whole ref.
+ */
+function refMatchesBlobPath(pathname: string, ref: string): string | null {
+  const match = pathname.match(/^\/[^/]+\/[^/]+\/blob\/(.+)$/);
+  if (!match) return null;
+
+  const encodedSegments = match[1].split("/");
+  // A segment contributes at least one `/`-separated part of the name, so the ref
+  // can't span more segments than it has parts, and the last segment is always
+  // the file path rather than any part of the ref.
+  const maxSegments = Math.min(ref.split("/").length, encodedSegments.length - 1);
+
+  for (let count = 1; count <= maxSegments; count++) {
+    let candidate: string;
+    try {
+      candidate = encodedSegments.slice(0, count).map(decodeURIComponent).join("/");
+    } catch {
+      // A malformed percent-escape can't be compared against a ref name; treat it
+      // as no match rather than letting decodeURIComponent throw out of here.
+      return null;
+    }
+    if (candidate === ref) return ref;
+  }
+  return null;
+}
+
+/**
+ * The ref a file view is at, read from the live DOM, or undefined if this isn't
+ * a file view or neither DOM source gives a ref that matches the URL. Like
+ * scrapeRunBranch(), called on every checkLocation() pass rather than awaited
+ * once, so an element that hasn't rendered yet is simply picked up on a later
+ * DOM mutation.
+ *
+ * Both sources are tried in turn, rather than only the first one that has a
+ * value, so a source that answers with something that doesn't match the URL
+ * doesn't shadow one that answers correctly.
+ */
+function scrapeBlobRef(context: JumpContext, pathname: string): string | undefined {
+  if (context.kind !== "repoFile") return undefined;
+
+  const label = document.querySelector(BLOB_REF_SELECTOR)?.getAttribute("aria-label");
+  const embedded = document.querySelector(BLOB_EMBEDDED_DATA_SELECTOR)?.textContent;
+  const candidates = [
+    label ? refNameFromRefSelectorLabel(label) : null,
+    embedded ? refNameFromEmbeddedData(embedded) : null,
+  ];
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const ref = refMatchesBlobPath(pathname, candidate);
+    if (ref) return ref;
+  }
+  return undefined;
+}
+
 /**
  * Where to read the current page's repo config from - the ref its own URL names
- * (see repoContextForJump()), plus the DOM-only ref a run page carries.
+ * (see repoContextForJump()), corrected by whichever ref the page's own DOM
+ * carries: a run page's branch link, or a file view's resolved ref.
  */
-function repoConfigTarget(context: JumpContext): RepoConfigTarget | null {
+function repoConfigTarget(context: JumpContext, pathname: string): RepoConfigTarget | null {
   const target = repoContextForJump(context);
   if (!target) return null;
-  const runBranch = scrapeRunBranch(context);
-  return runBranch ? { ...target, branch: runBranch } : target;
+  const domRef = scrapeRunBranch(context) ?? scrapeBlobRef(context, pathname);
+  return domRef ? { ...target, branch: domRef } : target;
 }
 
 let lastLocationKey: string | undefined;
@@ -2123,13 +2274,13 @@ function checkLocation(force = false): void {
   const context = resolveJumpContext(pathname, search);
   renderPending = renderJumpLinks(context);
 
-  // Deliberately not gated on locationChanged: on a run page the ref comes out
-  // of the DOM (see repoConfigTarget()), which may only have rendered by a later
-  // mutation-driven pass, at which point the config has to be re-read at that
-  // ref even though the URL never changed. Every pass that resolves the same
-  // target as last time stops at the key check just below, so re-checking here
-  // costs nothing.
-  const repoCtx = context ? repoConfigTarget(context) : null;
+  // Deliberately not gated on locationChanged: on a run page, and on a file view
+  // at a ref containing a slash, the ref comes out of the DOM (see
+  // repoConfigTarget()), which may only have rendered by a later mutation-driven
+  // pass, at which point the config has to be re-read at that ref even though
+  // the URL never changed. Every pass that resolves the same target as last time
+  // stops at the key check just below, so re-checking here costs nothing.
+  const repoCtx = context ? repoConfigTarget(context, pathname) : null;
   const repoKey = repoCtx ? repoConfigCacheKey(repoCtx.org, repoCtx.repo, repoCtx.branch) : undefined;
   if (repoKey === currentRepoConfigKey) return;
 
@@ -2196,6 +2347,9 @@ if (typeof module !== "undefined" && module.exports) {
     repoConfigCacheKey,
     repoConfigUrl,
     branchFromRunTreeHref,
+    refNameFromRefSelectorLabel,
+    refNameFromEmbeddedData,
+    refMatchesBlobPath,
     activeLinks,
     mergeConfigsForExport,
     renderTemplate,
