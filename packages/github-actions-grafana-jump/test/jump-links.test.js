@@ -31,6 +31,9 @@ const {
   placeholderFields,
   applicableLinks,
   repoContextForJump,
+  repoConfigCacheKey,
+  repoConfigUrl,
+  branchFromRunTreeHref,
   activeLinks,
   mergeConfigsForExport,
   renderTemplate,
@@ -620,12 +623,10 @@ test("applicableLinks drops a link using a field its own page never provides", (
 test("repoContextForJump extracts {org, repo} for repo-scoped contexts", () => {
   const repoScoped = [
     { kind: "repoHome", org: "o", repo: "r" },
-    { kind: "repoFile", org: "o", repo: "r", branch: "main" },
     { kind: "pr", org: "o", repo: "r", prNumber: "1" },
     { kind: "prList", org: "o", repo: "r" },
     { kind: "branchList", org: "o", repo: "r" },
     { kind: "actionsList", org: "o", repo: "r" },
-    { kind: "branch", org: "o", repo: "r", branch: "main" },
     { kind: "workflow", org: "o", repo: "r", workflowFile: "ci.yml" },
     { kind: "run", org: "o", repo: "r", runId: "9" },
     { kind: "job", org: "o", repo: "r", runId: "9", jobId: "1" },
@@ -636,9 +637,75 @@ test("repoContextForJump extracts {org, repo} for repo-scoped contexts", () => {
   }
 });
 
+test("repoContextForJump carries the branch for the page kinds whose URL names a ref", () => {
+  assert.deepEqual(repoContextForJump({ kind: "repoFile", org: "o", repo: "r", branch: "some/feature" }), {
+    org: "o",
+    repo: "r",
+    branch: "some/feature",
+  });
+  assert.deepEqual(repoContextForJump({ kind: "branch", org: "o", repo: "r", branch: "main" }), {
+    org: "o",
+    repo: "r",
+    branch: "main",
+  });
+});
+
 test("repoContextForJump returns null for org-scoped runner and runnerGroup contexts", () => {
   assert.equal(repoContextForJump({ kind: "runner", scope: "org", org: "o", runnerId: "9" }), null);
   assert.equal(repoContextForJump({ kind: "runnerGroup", org: "o", groupId: "3" }), null);
+});
+
+test("repoConfigCacheKey keeps a branch's config separate from the default branch's", () => {
+  assert.equal(repoConfigCacheKey("o", "r"), "o/r@HEAD");
+  assert.equal(repoConfigCacheKey("o", "r", "some/feature"), "o/r@some/feature");
+  assert.notEqual(repoConfigCacheKey("o", "r"), repoConfigCacheKey("o", "r", "main"));
+});
+
+test("repoConfigUrl reads the default branch when no branch is given", () => {
+  assert.equal(
+    repoConfigUrl("some-org", "some-repo"),
+    "https://raw.githubusercontent.com/some-org/some-repo/HEAD/.github/jump-links.config.yaml",
+  );
+});
+
+test("repoConfigUrl reads the given branch, keeping its slashes literal", () => {
+  assert.equal(
+    repoConfigUrl("some-org", "some-repo", "renovate/all-patch"),
+    "https://raw.githubusercontent.com/some-org/some-repo/renovate/all-patch/.github/jump-links.config.yaml",
+  );
+});
+
+test("repoConfigUrl escapes characters that would otherwise change the URL", () => {
+  assert.equal(
+    repoConfigUrl("some-org", "some-repo", "weird?branch#name"),
+    "https://raw.githubusercontent.com/some-org/some-repo/weird%3Fbranch%23name/.github/jump-links.config.yaml",
+  );
+});
+
+test("branchFromRunTreeHref reads the branch out of a run header's branch link", () => {
+  assert.equal(
+    branchFromRunTreeHref("/nsheaps/greasemonkey-scripts/tree/refs/heads/renovate/all-patch", "nsheaps", "greasemonkey-scripts"),
+    "renovate/all-patch",
+  );
+  // The same link's shorter, unqualified form.
+  assert.equal(branchFromRunTreeHref("/o/r/tree/main", "o", "r"), "main");
+  assert.equal(branchFromRunTreeHref("/o/r/tree/some%2Fbranch", "o", "r"), "some/branch");
+});
+
+test("branchFromRunTreeHref ignores an owner/repo casing difference", () => {
+  assert.equal(branchFromRunTreeHref("/NSheaps/Some-Repo/tree/refs/heads/main", "nsheaps", "some-repo"), "main");
+});
+
+test("branchFromRunTreeHref rejects a href for a different repo, as a fork PR's head is", () => {
+  assert.equal(branchFromRunTreeHref("/someone-else/r/tree/refs/heads/main", "o", "r"), null);
+  assert.equal(branchFromRunTreeHref("/o/other-repo/tree/refs/heads/main", "o", "r"), null);
+});
+
+test("branchFromRunTreeHref rejects a ref that isn't a branch, and a href that isn't a tree link", () => {
+  assert.equal(branchFromRunTreeHref("/o/r/tree/refs/tags/v1.0.0", "o", "r"), null);
+  assert.equal(branchFromRunTreeHref("/o/r/tree/refs/heads/", "o", "r"), null);
+  assert.equal(branchFromRunTreeHref("/o/r/blob/main/README.md", "o", "r"), null);
+  assert.equal(branchFromRunTreeHref("/o/r/tree/", "o", "r"), null);
 });
 
 test("activeLinks prefers the personal config outright when it has anything applicable", () => {

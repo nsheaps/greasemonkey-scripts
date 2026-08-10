@@ -728,24 +728,44 @@ function applicableLinks(config: JumpLinksConfig, context: JumpContext): JumpLin
 }
 
 /**
- * The {org, repo} a jump context belongs to, for looking up that repo's
- * `.github/jump-links.config.yaml` - or null when the context isn't scoped to
- * one repo (an org-scoped runner or runner-group page covers every repo in
- * the org, so there's no single repo config to fetch).
+ * Which repo's `.github/jump-links.config.yaml` a jump context should be read
+ * from, and at which ref - or null when the context isn't scoped to one repo
+ * (an org-scoped runner or runner-group page covers every repo in the org, so
+ * there's no single repo config to fetch).
+ *
+ * `branch` is only filled in for the page kinds whose own URL names a ref: the
+ * file view (`/blob/<ref>/...`) and the Actions tab filtered to one branch
+ * (`?query=branch:<name>`). On those pages you're explicitly looking at one
+ * ref, so its version of the config is the one to use - which is what lets a
+ * change to that file be tried out on a branch before it's merged. Every other
+ * page kind has no single ref to prefer, so its config keeps coming from the
+ * default branch (an absent `branch` here, i.e. the `HEAD` alias - see
+ * repoConfigUrl()).
+ *
+ * Run and job pages are the exception that this pure function can't cover: a
+ * run's ref isn't in its URL at all, only in the page's own DOM, so it's read
+ * separately by scrapeRunBranch() and layered on top of this result.
  */
-function repoContextForJump(context: JumpContext): { org: string; repo: string } | null {
+interface RepoConfigTarget {
+  org: string;
+  repo: string;
+  branch?: string;
+}
+
+function repoContextForJump(context: JumpContext): RepoConfigTarget | null {
   switch (context.kind) {
     case "repoHome":
-    case "repoFile":
     case "pr":
     case "prList":
     case "branchList":
     case "actionsList":
-    case "branch":
     case "workflow":
     case "run":
     case "job":
       return { org: context.org, repo: context.repo };
+    case "repoFile":
+    case "branch":
+      return { org: context.org, repo: context.repo, branch: context.branch };
     case "runner":
       return context.repo ? { org: context.org, repo: context.repo } : null;
     case "runnerGroup":
@@ -1138,24 +1158,56 @@ async function checkForUpdate(): Promise<void> {
 // GM.xmlHttpRequest is exempt from the page's CSP/CORS by design, which is
 // exactly why it exists.
 //
-// Cached per {org, repo} for the life of the tab: GitHub's pages are a
+// Cached per {org, repo, ref} for the life of the tab: GitHub's pages are a
 // single-page app, so navigating between pages in the same repo would
 // otherwise re-fetch this on every checkLocation() call for no reason.
 // ---------------------------------------------------------------------------
 
 const REPO_CONFIG_PATH = ".github/jump-links.config.yaml";
 
+/**
+ * Which ref a repo config is read at when the page doesn't name one: the
+ * default branch, via the alias raw.githubusercontent.com accepts in place of
+ * a branch name. Doubles as the cache key's ref for that case, so a
+ * default-branch fetch and a fetch of some specific branch for the same repo
+ * are two distinct cache entries rather than one shadowing the other.
+ */
+const DEFAULT_BRANCH_REF = "HEAD";
+
+function repoConfigCacheKey(org: string, repo: string, branch?: string): string {
+  return `${org}/${repo}@${branch ?? DEFAULT_BRANCH_REF}`;
+}
+
+/**
+ * The raw.githubusercontent.com URL a repo's config file is read from, at the
+ * given branch or (when none is given) at the default branch.
+ *
+ * A branch name can itself contain slashes (`renovate/all-patch`), and those
+ * have to stay literal slashes in the path for the ref to resolve, so the ref
+ * is encoded segment by segment rather than as one component - percent-encoding
+ * the separator would leave a name that no longer matches the branch. (Both
+ * forms happen to resolve on raw.githubusercontent.com today, but only the
+ * literal-slash form is the URL the branch actually has.)
+ */
+function repoConfigUrl(org: string, repo: string, branch?: string): string {
+  const ref = branch
+    ? branch.split("/").map(encodeURIComponent).join("/")
+    : DEFAULT_BRANCH_REF;
+  return (
+    `https://raw.githubusercontent.com/${encodeURIComponent(org)}/${encodeURIComponent(repo)}` +
+    `/${ref}/${REPO_CONFIG_PATH}`
+  );
+}
+
 const repoConfigCache = new Map<string, Promise<JumpLinksConfig | null>>();
 
-function fetchRepoConfig(org: string, repo: string): Promise<JumpLinksConfig | null> {
-  const key = `${org}/${repo}`;
+function fetchRepoConfig(org: string, repo: string, branch?: string): Promise<JumpLinksConfig | null> {
+  const key = repoConfigCacheKey(org, repo, branch);
   const cached = repoConfigCache.get(key);
   if (cached) return cached;
 
   const promise = new Promise<JumpLinksConfig | null>((resolve) => {
-    const url =
-      `https://raw.githubusercontent.com/${encodeURIComponent(org)}/${encodeURIComponent(repo)}` +
-      `/HEAD/${REPO_CONFIG_PATH}`;
+    const url = repoConfigUrl(org, repo, branch);
     GM.xmlHttpRequest({
       method: "GET",
       url,
@@ -1363,9 +1415,11 @@ const ROW_LINK_STYLE =
 let currentConfig: JumpLinksConfig = defaultConfig();
 
 // The current page's repo config (see the "Repo config fetching" section
-// above), and the "org/repo" key it belongs to - null/undefined until a repo
-// config has actually been fetched (or the current context isn't scoped to a
-// single repo at all, e.g. the org-scoped runner page).
+// above), and the "org/repo@ref" key it belongs to - null/undefined until a
+// repo config has actually been fetched (or the current context isn't scoped to
+// a single repo at all, e.g. the org-scoped runner page). The ref is part of the
+// key, not just the cache's, so moving between two branches of the same repo
+// re-reads the config rather than keeping the first branch's copy.
 let currentRepoConfig: JumpLinksConfig | null = null;
 let currentRepoConfigKey: string | undefined;
 
@@ -1961,6 +2015,97 @@ function renderJumpLinks(context: JumpContext | null): boolean {
   return Boolean(PAGE_TOOLBAR_SELECTORS[context.kind]) || isListPageKind(context.kind);
 }
 
+// ---------------------------------------------------------------------------
+// Which ref a workflow run ran on. Unlike every other page kind, a run's URL
+// (`/actions/runs/<id>`) says nothing about its ref, so the only place to read
+// it is the run page's own DOM - which means this can't live with the pure
+// context parsing above.
+//
+// The run summary header states what triggered the run, and the branch there is
+// a link to that branch's tree, confirmed against the live github.com DOM:
+//
+//   <div class="d-flex flex-wrap col-triggered-content ...">
+//     <a class="Link--primary ..." href="/apps/renovate">renovate[bot]</a>
+//     <div ...>opened #50</div>
+//     <a class="d-inline-block branch-name css-truncate css-truncate-target"
+//        href="/nsheaps/greasemonkey-scripts/tree/refs/heads/renovate/all-patch"
+//        >renovate/all-patch</a>
+//   </div>
+//
+// Both classes used to find it are GitHub's own non-hashed ones on a
+// server-rendered (not Primer React) part of the page, and the ref is taken from
+// the link's href rather than its text, which is truncated for display.
+//
+// A run triggered by a pull request resolves to the PR's head branch, which is
+// the same link in the same place (verified on a real PR-triggered run) - that
+// is the branch whose config file you'd be editing to try a change out, so it's
+// the useful answer rather than a case to skip. A cross-repo (fork) PR's head
+// branch doesn't exist in the repo being browsed, so the href's own repo has to
+// match this page's before its ref is used; when it doesn't, there's no
+// override and the config comes from the default branch as before.
+//
+// Job pages have no such element anywhere in their DOM - checked both on a
+// direct load and after navigating into a job from its run page - so a job page
+// never gets an override and reads its config from the default branch. That's
+// the same safe fallback as any run page whose header hasn't rendered yet:
+// better a stale-but-real config than a guessed ref.
+// ---------------------------------------------------------------------------
+
+const RUN_BRANCH_SELECTOR = ".col-triggered-content a.branch-name";
+
+/**
+ * The branch name a run header's branch link points at, or null if that href
+ * isn't a branch in the given repo. Handles both forms GitHub writes: the fully
+ * qualified `refs/heads/<branch>` this link currently uses, and a bare
+ * `<branch>`. A ref in any other namespace (`refs/tags/...`) is not a branch and
+ * is rejected rather than fetched as one.
+ */
+function branchFromRunTreeHref(href: string, org: string, repo: string): string | null {
+  const match = href.match(/^\/([^/]+)\/([^/]+)\/tree\/(.+)$/);
+  if (!match) return null;
+  const [, hrefOrg, hrefRepo, rawRef] = match;
+  // GitHub treats owner and repo names case-insensitively, and the href is
+  // whatever casing GitHub rendered, which needn't match the URL's.
+  if (hrefOrg.toLowerCase() !== org.toLowerCase()) return null;
+  if (hrefRepo.toLowerCase() !== repo.toLowerCase()) return null;
+
+  const ref = decodeURIComponent(rawRef);
+  if (ref.startsWith("refs/heads/")) {
+    const branch = ref.slice("refs/heads/".length);
+    return branch === "" ? null : branch;
+  }
+  // Stripped to the bare branch name rather than kept qualified so a run page
+  // and the branch-filtered Actions tab for the same branch share one cache
+  // entry (see repoConfigCacheKey()).
+  if (ref.startsWith("refs/")) return null;
+  return ref;
+}
+
+/**
+ * The branch a run/job page's run ran on, read from the live DOM, or undefined
+ * if this isn't such a page or the branch can't be determined from it. Called
+ * on every checkLocation() pass rather than awaited once, so a header that
+ * hasn't rendered yet is simply picked up on a later DOM mutation - the same way
+ * renderToolbarButtons() handles a toolbar that isn't in the DOM yet.
+ */
+function scrapeRunBranch(context: JumpContext): string | undefined {
+  if (context.kind !== "run" && context.kind !== "job") return undefined;
+  const href = document.querySelector(RUN_BRANCH_SELECTOR)?.getAttribute("href");
+  if (!href) return undefined;
+  return branchFromRunTreeHref(href, context.org, context.repo) ?? undefined;
+}
+
+/**
+ * Where to read the current page's repo config from - the ref its own URL names
+ * (see repoContextForJump()), plus the DOM-only ref a run page carries.
+ */
+function repoConfigTarget(context: JumpContext): RepoConfigTarget | null {
+  const target = repoContextForJump(context);
+  if (!target) return null;
+  const runBranch = scrapeRunBranch(context);
+  return runBranch ? { ...target, branch: runBranch } : target;
+}
+
 let lastLocationKey: string | undefined;
 // True while the current page still needs re-rendering on DOM mutations - see
 // renderJumpLinks()'s return value. Keeps checkLocation() re-rendering on
@@ -1978,16 +2123,20 @@ function checkLocation(force = false): void {
   const context = resolveJumpContext(pathname, search);
   renderPending = renderJumpLinks(context);
 
-  if (!locationChanged) return;
-
-  const repoCtx = context ? repoContextForJump(context) : null;
-  const repoKey = repoCtx ? `${repoCtx.org}/${repoCtx.repo}` : undefined;
+  // Deliberately not gated on locationChanged: on a run page the ref comes out
+  // of the DOM (see repoConfigTarget()), which may only have rendered by a later
+  // mutation-driven pass, at which point the config has to be re-read at that
+  // ref even though the URL never changed. Every pass that resolves the same
+  // target as last time stops at the key check just below, so re-checking here
+  // costs nothing.
+  const repoCtx = context ? repoConfigTarget(context) : null;
+  const repoKey = repoCtx ? repoConfigCacheKey(repoCtx.org, repoCtx.repo, repoCtx.branch) : undefined;
   if (repoKey === currentRepoConfigKey) return;
 
   currentRepoConfigKey = repoKey;
   currentRepoConfig = null;
   if (repoCtx) {
-    void fetchRepoConfig(repoCtx.org, repoCtx.repo).then((config) => {
+    void fetchRepoConfig(repoCtx.org, repoCtx.repo, repoCtx.branch).then((config) => {
       // Guard against a slow response landing after the user has already
       // navigated to a different repo (or one with no repo context at all).
       if (currentRepoConfigKey !== repoKey) return;
@@ -2044,6 +2193,9 @@ if (typeof module !== "undefined" && module.exports) {
     placeholderFields,
     applicableLinks,
     repoContextForJump,
+    repoConfigCacheKey,
+    repoConfigUrl,
+    branchFromRunTreeHref,
     activeLinks,
     mergeConfigsForExport,
     renderTemplate,
