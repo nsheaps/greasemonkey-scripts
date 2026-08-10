@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.11](https://github.com/nsheaps/greasemonkey-scripts/compare/release/last-run...0.2.11) (2026-08-10)
+
+### Bug Fixes
+
+* **github-actions-grafana-jump:** resolve a file view's ref when the branch name has a slash ([#53](https://github.com/nsheaps/greasemonkey-scripts/issues/53)) ([81d8e1c](https://github.com/nsheaps/greasemonkey-scripts/commit/81d8e1cffa5d1cd4f90ae081bc48750aee7fc89e))
+
 ## [0.2.10](https://github.com/nsheaps/greasemonkey-scripts/compare/release/last-run...0.2.10) (2026-08-10)
 
 ### Features
