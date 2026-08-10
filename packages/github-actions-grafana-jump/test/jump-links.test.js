@@ -34,6 +34,9 @@ const {
   repoConfigCacheKey,
   repoConfigUrl,
   branchFromRunTreeHref,
+  refNameFromRefSelectorLabel,
+  refNameFromEmbeddedData,
+  refMatchesBlobPath,
   activeLinks,
   mergeConfigsForExport,
   renderTemplate,
@@ -706,6 +709,90 @@ test("branchFromRunTreeHref rejects a ref that isn't a branch, and a href that i
   assert.equal(branchFromRunTreeHref("/o/r/tree/refs/heads/", "o", "r"), null);
   assert.equal(branchFromRunTreeHref("/o/r/blob/main/README.md", "o", "r"), null);
   assert.equal(branchFromRunTreeHref("/o/r/tree/", "o", "r"), null);
+});
+
+// ---------------------------------------------------------------------------
+// Reading a file view's real ref out of its DOM (see scrapeBlobRef in src).
+// The DOM lookups themselves aren't covered here - these are the pure pieces
+// they're built out of, exercised on values captured from live github.com.
+// ---------------------------------------------------------------------------
+
+test("refNameFromRefSelectorLabel reads the full ref out of the ref picker's aria-label", () => {
+  assert.equal(refNameFromRefSelectorLabel("main branch"), "main");
+  assert.equal(
+    refNameFromRefSelectorLabel("nate-ai/generic-grafana-jump branch"),
+    "nate-ai/generic-grafana-jump",
+  );
+  assert.equal(refNameFromRefSelectorLabel("v1.0.0 tag"), "v1.0.0");
+});
+
+test("refNameFromRefSelectorLabel keeps a ref whose own name ends in the label's suffix", () => {
+  assert.equal(refNameFromRefSelectorLabel("some branch branch"), "some branch");
+});
+
+test("refNameFromRefSelectorLabel rejects a label that isn't in that shape", () => {
+  assert.equal(refNameFromRefSelectorLabel("main"), null);
+  assert.equal(refNameFromRefSelectorLabel(" branch"), null);
+  assert.equal(refNameFromRefSelectorLabel(""), null);
+});
+
+test("refNameFromEmbeddedData reads the ref out of the file view's embedded payload", () => {
+  const payload = JSON.stringify({
+    payload: {
+      codeViewBlobLayoutRoute: {
+        refInfo: { name: "nate-ai/generic-grafana-jump", refType: "branch", currentOid: "db2b479" },
+      },
+    },
+  });
+  assert.equal(refNameFromEmbeddedData(payload), "nate-ai/generic-grafana-jump");
+});
+
+test("refNameFromEmbeddedData decodes a ref name carrying JSON escapes", () => {
+  assert.equal(refNameFromEmbeddedData('{"refInfo":{"name":"feature/caf\\u00e9","refType":"branch"}}'), "feature/café");
+});
+
+test("refNameFromEmbeddedData returns null when the payload has no refInfo", () => {
+  assert.equal(refNameFromEmbeddedData('{"payload":{"repo":{"name":"r"}}}'), null);
+  assert.equal(refNameFromEmbeddedData(""), null);
+});
+
+test("refMatchesBlobPath accepts a ref that spans several of the URL's path segments", () => {
+  assert.equal(
+    refMatchesBlobPath("/nsheaps/greasemonkey-scripts/blob/nate-ai/generic-grafana-jump/README.md", "nate-ai/generic-grafana-jump"),
+    "nate-ai/generic-grafana-jump",
+  );
+  assert.equal(refMatchesBlobPath("/o/r/blob/main/README.md", "main"), "main");
+  assert.equal(refMatchesBlobPath("/o/r/blob/main/src/deeply/nested.ts", "main"), "main");
+});
+
+test("refMatchesBlobPath compares against decoded path segments", () => {
+  assert.equal(refMatchesBlobPath("/o/r/blob/my%20branch/README.md", "my branch"), "my branch");
+  // A slashed ref can arrive percent-encoded inside a single segment rather than
+  // as literal separators, so how many parts the ref's name has doesn't fix how
+  // many segments of the URL it takes up - both readings have to be tried.
+  assert.equal(refMatchesBlobPath("/o/r/blob/feature%2Fone/README.md", "feature/one"), "feature/one");
+  assert.equal(refMatchesBlobPath("/o/r/blob/feature%2Fone/src/index.ts", "feature/one"), "feature/one");
+  assert.equal(refMatchesBlobPath("/o/r/blob/feature/one/README.md", "feature/one"), "feature/one");
+});
+
+test("refMatchesBlobPath rejects a ref that isn't a leading run of the URL's segments", () => {
+  // What a value gone stale during a soft navigation looks like: it describes
+  // some other page, not the one on screen.
+  assert.equal(refMatchesBlobPath("/o/r/blob/main/README.md", "some-other-branch"), null);
+  assert.equal(refMatchesBlobPath("/o/r/blob/nate-ai/generic-grafana-jump/README.md", "nate-ai/something-else"), null);
+  // A short commit SHA against the full one the URL carries.
+  assert.equal(refMatchesBlobPath("/o/r/blob/db2b47905bd43b1fb58766bcf99a0725cc63e755/README.md", "db2b479"), null);
+});
+
+test("refMatchesBlobPath rejects a ref that would leave no file path behind it", () => {
+  assert.equal(refMatchesBlobPath("/o/r/blob/main/README.md", "main/README.md"), null);
+  assert.equal(refMatchesBlobPath("/o/r/blob/main/README.md", "main/README.md/extra"), null);
+});
+
+test("refMatchesBlobPath rejects a pathname that isn't a file view", () => {
+  assert.equal(refMatchesBlobPath("/o/r/tree/main/src", "main"), null);
+  assert.equal(refMatchesBlobPath("/o/r/blob/main", "main"), null);
+  assert.equal(refMatchesBlobPath("/o/r", "main"), null);
 });
 
 test("activeLinks prefers the personal config outright when it has anything applicable", () => {
