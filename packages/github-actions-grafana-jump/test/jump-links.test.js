@@ -12,6 +12,7 @@ const assert = require("node:assert/strict");
 const {
   parseRepoHomeContext,
   parseRepoFileContext,
+  parseRepoTreeRootContext,
   parsePrContext,
   parsePrListContext,
   parseBranchListContext,
@@ -37,6 +38,8 @@ const {
   refNameFromRefSelectorLabel,
   refNameFromEmbeddedData,
   refMatchesBlobPath,
+  refMatchesTreeRootPath,
+  mayBeUnresolvedTreeRoot,
   activeLinks,
   mergeConfigsForExport,
   renderTemplate,
@@ -98,6 +101,37 @@ test("parseRepoFileContext matches a file at a ref and decodes the ref", () => {
 test("parseRepoFileContext does not match a directory view or a bare ref", () => {
   assert.equal(parseRepoFileContext("/oura/some-repo/tree/main/src"), null);
   assert.equal(parseRepoFileContext("/oura/some-repo/blob/main"), null);
+});
+
+test("parseRepoTreeRootContext reads the repo root at a ref as its home page", () => {
+  assert.deepEqual(parseRepoTreeRootContext("/oura/some-repo/tree/main"), {
+    kind: "repoHome",
+    org: "oura",
+    repo: "some-repo",
+    branch: "main",
+  });
+  assert.deepEqual(parseRepoTreeRootContext("/oura/some-repo/tree/main/"), {
+    kind: "repoHome",
+    org: "oura",
+    repo: "some-repo",
+    branch: "main",
+  });
+  assert.deepEqual(parseRepoTreeRootContext("/oura/some-repo/tree/renovate%2Fall-patch"), {
+    kind: "repoHome",
+    org: "oura",
+    repo: "some-repo",
+    branch: "renovate/all-patch",
+  });
+});
+
+test("parseRepoTreeRootContext leaves an ambiguous multi-segment tree URL alone", () => {
+  // "/tree/renovate/all-patch" is equally the root at ref "renovate/all-patch"
+  // or directory "all-patch" at ref "renovate"; only the ref in the page's own
+  // DOM settles it, so nothing is matched from the URL alone here.
+  assert.equal(parseRepoTreeRootContext("/oura/some-repo/tree/renovate/all-patch"), null);
+  assert.equal(parseRepoTreeRootContext("/oura/some-repo/tree/main/packages"), null);
+  assert.equal(parseRepoTreeRootContext("/oura/some-repo/tree"), null);
+  assert.equal(parseRepoTreeRootContext("/oura/some-repo"), null);
 });
 
 test("parsePrContext matches the PR checks tab and other PR sub-tabs", () => {
@@ -245,6 +279,11 @@ test("resolveJumpContext dispatches to the right parser for each supported URL s
       "",
       { kind: "repoFile", org: "oura", repo: "some-repo", branch: "main" },
     ],
+    [
+      "/oura/some-repo/tree/main",
+      "",
+      { kind: "repoHome", org: "oura", repo: "some-repo", branch: "main" },
+    ],
     ["/oura/some-repo/pull/42", "", { kind: "pr", org: "oura", repo: "some-repo", prNumber: "42" }],
     ["/oura/some-repo/pulls", "", { kind: "prList", org: "oura", repo: "some-repo" }],
     ["/oura/some-repo/branches", "", { kind: "branchList", org: "oura", repo: "some-repo" }],
@@ -283,7 +322,10 @@ test("resolveJumpContext dispatches to the right parser for each supported URL s
 
 test("resolveJumpContext returns null for pages with no jump context", () => {
   assert.equal(resolveJumpContext("/oura/some-repo/issues/1", ""), null);
+  // A directory below the repo root is a different page with a different header,
+  // and stays unmatched however deep it goes.
   assert.equal(resolveJumpContext("/oura/some-repo/tree/main/src", ""), null);
+  assert.equal(resolveJumpContext("/oura/some-repo/tree/main/packages/some-package", ""), null);
   assert.equal(resolveJumpContext("/", ""), null);
 });
 
@@ -651,6 +693,28 @@ test("repoContextForJump carries the branch for the page kinds whose URL names a
     repo: "r",
     branch: "main",
   });
+  // The repo home page viewed at a ref reads that ref's config, so a config
+  // change can be tried out from the branch's own tree view before it's merged.
+  assert.deepEqual(repoContextForJump({ kind: "repoHome", org: "o", repo: "r", branch: "some/feature" }), {
+    org: "o",
+    repo: "r",
+    branch: "some/feature",
+  });
+});
+
+test("a repo home page at a ref reads its config from that ref", () => {
+  const context = resolveJumpContext("/o/r/tree/some-feature", "");
+  const target = repoContextForJump(context);
+  assert.equal(repoConfigCacheKey(target.org, target.repo, target.branch), "o/r@some-feature");
+  assert.equal(
+    repoConfigUrl(target.org, target.repo, target.branch),
+    "https://raw.githubusercontent.com/o/r/some-feature/.github/jump-links.config.yaml",
+  );
+
+  // ... while the plain repo home URL names no ref and keeps reading the default
+  // branch, as a separate cache entry.
+  const plain = repoContextForJump(resolveJumpContext("/o/r", ""));
+  assert.equal(repoConfigCacheKey(plain.org, plain.repo, plain.branch), "o/r@HEAD");
 });
 
 test("repoContextForJump returns null for org-scoped runner and runnerGroup contexts", () => {
@@ -793,6 +857,51 @@ test("refMatchesBlobPath rejects a pathname that isn't a file view", () => {
   assert.equal(refMatchesBlobPath("/o/r/tree/main/src", "main"), null);
   assert.equal(refMatchesBlobPath("/o/r/blob/main", "main"), null);
   assert.equal(refMatchesBlobPath("/o/r", "main"), null);
+});
+
+test("refMatchesTreeRootPath accepts a ref that accounts for the whole tree path", () => {
+  assert.equal(
+    refMatchesTreeRootPath("/nsheaps/greasemonkey-scripts/tree/renovate/all-patch", "renovate/all-patch"),
+    "renovate/all-patch",
+  );
+  assert.equal(refMatchesTreeRootPath("/o/r/tree/main", "main"), "main");
+  assert.equal(refMatchesTreeRootPath("/o/r/tree/main/", "main"), "main");
+});
+
+test("refMatchesTreeRootPath compares against decoded path segments", () => {
+  assert.equal(refMatchesTreeRootPath("/o/r/tree/my%20branch", "my branch"), "my branch");
+  assert.equal(refMatchesTreeRootPath("/o/r/tree/feature%2Fone", "feature/one"), "feature/one");
+  assert.equal(refMatchesTreeRootPath("/o/r/tree/feature/one", "feature/one"), "feature/one");
+});
+
+test("refMatchesTreeRootPath rejects a ref that leaves a directory path behind it", () => {
+  // The page is then a directory below the repo root, which has no toolbar to
+  // put links in - so this must not resolve to the repo home page.
+  assert.equal(refMatchesTreeRootPath("/o/r/tree/main/packages", "main"), null);
+  assert.equal(refMatchesTreeRootPath("/o/r/tree/renovate/all-patch/src", "renovate/all-patch"), null);
+});
+
+test("refMatchesTreeRootPath rejects a ref that isn't what the URL says at all", () => {
+  assert.equal(refMatchesTreeRootPath("/o/r/tree/main", "some-other-branch"), null);
+  // An abbreviated commit SHA in the ref picker against the full one in the URL.
+  assert.equal(refMatchesTreeRootPath("/o/r/tree/db2b47905bd43b1fb58766bcf99a0725cc63e755", "db2b479"), null);
+});
+
+test("refMatchesTreeRootPath rejects a pathname that isn't a tree view", () => {
+  assert.equal(refMatchesTreeRootPath("/o/r/blob/main/README.md", "main"), null);
+  assert.equal(refMatchesTreeRootPath("/o/r/tree", "main"), null);
+  assert.equal(refMatchesTreeRootPath("/o/r", "main"), null);
+});
+
+test("mayBeUnresolvedTreeRoot flags only the tree URLs the DOM still has to settle", () => {
+  // Ambiguous: keep re-checking on DOM mutations until GitHub's header renders.
+  assert.equal(mayBeUnresolvedTreeRoot("/o/r/tree/renovate/all-patch"), true);
+  assert.equal(mayBeUnresolvedTreeRoot("/o/r/tree/main/packages"), true);
+  // Already answered from the URL alone, or not a tree URL at all.
+  assert.equal(mayBeUnresolvedTreeRoot("/o/r/tree/main"), false);
+  assert.equal(mayBeUnresolvedTreeRoot("/o/r/tree/main/"), false);
+  assert.equal(mayBeUnresolvedTreeRoot("/o/r"), false);
+  assert.equal(mayBeUnresolvedTreeRoot("/o/r/blob/main/README.md"), false);
 });
 
 test("activeLinks prefers the personal config outright when it has anything applicable", () => {

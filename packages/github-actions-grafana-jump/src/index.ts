@@ -187,11 +187,24 @@ function linkDisplayName(link: JumpLink): string {
 // tested directly (see test/jump-links.test.js).
 // ---------------------------------------------------------------------------
 
-/** The repo's own landing page, e.g. `/org/repo`. */
+/**
+ * The repo's own landing page, e.g. `/org/repo` - including the same page shown
+ * at some other ref, `/org/repo/tree/<ref>`, which is where GitHub's own branch
+ * selector takes you and carries the same header toolbar (confirmed against the
+ * live DOM).
+ *
+ * `branch` is only set in that second form, since the plain `/org/repo` URL
+ * names no ref. It decides which ref this page's repo config is read at (see
+ * repoContextForJump()) and is deliberately not exposed as a `{{branch}}` field:
+ * which fields the repo home page provides shouldn't depend on whether you got
+ * there with a ref in the URL, or a link configured for it would come and go as
+ * you switch branches.
+ */
 interface RepoHomeContext {
   kind: "repoHome";
   org: string;
   repo: string;
+  branch?: string;
 }
 
 /** A single file being viewed at some ref, e.g. `/org/repo/blob/main/README.md`. */
@@ -388,14 +401,39 @@ function parseRepoHomeContext(pathname: string): RepoHomeContext | null {
  * repoConfigTarget()). This stays the pure, synchronous, always-available
  * reading, and the one that stands if the DOM has no answer.
  *
- * Directory views (`/tree/<ref>/...`) are not matched: they're a different
- * page with a different toolbar.
+ * A directory view (`/tree/<ref>/<path>`) is not matched: it's a different page,
+ * and its header doesn't carry the toolbar this script's buttons go in (verified
+ * live - the repo header actions element is simply absent there). The repo's own
+ * root at a ref (`/tree/<ref>` with no path after it) does have that toolbar and
+ * is matched, as a repo home page - see parseRepoTreeRootContext().
  */
 function parseRepoFileContext(pathname: string): RepoFileContext | null {
   const match = pathname.match(/^\/([^/]+)\/([^/]+)\/blob\/([^/]+)\/.+$/);
   if (!match) return null;
   const [, org, repo, branch] = match;
   return { kind: "repoFile", org, repo, branch: decodeURIComponent(branch) };
+}
+
+/**
+ * Matches the repo's own root viewed at some ref, e.g. `/org/repo/tree/main` -
+ * which GitHub renders as the same page as `/org/repo`, with the same header
+ * toolbar, just showing another branch's tree. So it resolves to a
+ * RepoHomeContext carrying that ref rather than to a page kind of its own.
+ *
+ * Only the unambiguous single-segment form is read here: with exactly one segment
+ * after `/tree/`, that segment is the whole ref and there's no path it could be
+ * hiding. Two or more segments are genuinely ambiguous - `/tree/renovate/all-patch`
+ * is equally readable as the root at ref `renovate/all-patch` or as directory
+ * `all-patch` at ref `renovate` - and nothing in the URL settles it, the same
+ * ambiguity parseRepoFileContext() documents. That case is settled against the ref
+ * GitHub itself resolved the page to, read from the DOM by
+ * scrapeRepoTreeRootContext() and layered on top of this pure reading.
+ */
+function parseRepoTreeRootContext(pathname: string): RepoHomeContext | null {
+  const match = pathname.match(/^\/([^/]+)\/([^/]+)\/tree\/([^/]+)\/?$/);
+  if (!match) return null;
+  const [, org, repo, branch] = match;
+  return { kind: "repoHome", org, repo, branch: decodeURIComponent(branch) };
 }
 
 /**
@@ -550,6 +588,7 @@ function resolveJumpContext(pathname: string, search: string): JumpContext | nul
     parsePrListContext(pathname) ??
     parseBranchListContext(pathname) ??
     parseRepoFileContext(pathname) ??
+    parseRepoTreeRootContext(pathname) ??
     parseRepoHomeContext(pathname)
   );
 }
@@ -590,6 +629,9 @@ function contextFields(context: JumpContext): ContextFields {
   });
 
   switch (context.kind) {
+    // The repo home page provides the same fields whether or not its URL names a
+    // ref (`/org/repo` vs `/org/repo/tree/<ref>`); that ref only decides which
+    // ref its repo config is read at - see RepoHomeContext.
     case "repoHome":
     case "prList":
     case "branchList":
@@ -740,7 +782,8 @@ function applicableLinks(config: JumpLinksConfig, context: JumpContext): JumpLin
  * there's no single repo config to fetch).
  *
  * `branch` is only filled in for the page kinds whose own URL names a ref: the
- * file view (`/blob/<ref>/...`) and the Actions tab filtered to one branch
+ * file view (`/blob/<ref>/...`), the repo home page viewed at a ref
+ * (`/tree/<ref>`), and the Actions tab filtered to one branch
  * (`?query=branch:<name>`). On those pages you're explicitly looking at one
  * ref, so its version of the config is the one to use - which is what lets a
  * change to that file be tried out on a branch before it's merged. Every other
@@ -761,6 +804,11 @@ interface RepoConfigTarget {
 function repoContextForJump(context: JumpContext): RepoConfigTarget | null {
   switch (context.kind) {
     case "repoHome":
+      // Only carries a ref when reached as `/org/repo/tree/<ref>`; the plain
+      // `/org/repo` URL names none, and reads the default branch as before.
+      return context.branch
+        ? { org: context.org, repo: context.repo, branch: context.branch }
+        : { org: context.org, repo: context.repo };
     case "pr":
     case "prList":
     case "branchList":
@@ -1388,6 +1436,11 @@ pages:
  * floating fallback instead (see renderJumpLinks()).
  */
 const PAGE_TOOLBAR_SELECTORS: Partial<Record<JumpPageKind, string>> = {
+  // The Pin / Watch / Fork / Star list in the repo header. Present with the same
+  // testid and the same <ul> shape both on `/org/repo` and on the same page at a
+  // ref (`/org/repo/tree/<ref>`), which is why both resolve to this one page kind
+  // - and absent on a directory view below the root, which is why that one isn't
+  // matched at all (both verified against the live DOM).
   repoHome: '[data-testid="repo-header-actions"]',
   // The raw/edit button group in a file's own header - a non-hashed class,
   // unlike the Primer React module classes around it.
@@ -2102,18 +2155,24 @@ function scrapeRunBranch(context: JumpContext): string | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// Which ref a file view is actually at. `/org/repo/blob/<ref>/<path>` doesn't
-// mark where the ref ends and the path begins, so a ref containing a slash makes
-// the URL genuinely ambiguous: `/blob/nate-ai/generic-grafana-jump/README.md` is
-// equally readable as branch `nate-ai` + path `generic-grafana-jump/README.md`
-// or branch `nate-ai/generic-grafana-jump` + path `README.md`. Only the repo's
-// real ref list settles it, which is why parseRepoFileContext() can't: it takes
-// the first segment, right on any ref without a slash and truncated on one with.
+// Which ref a code-browsing page is actually at. Neither
+// `/org/repo/blob/<ref>/<path>` nor `/org/repo/tree/<ref>` marks where the ref
+// ends, so a ref containing a slash makes both URL shapes genuinely ambiguous:
+// `/blob/nate-ai/generic-grafana-jump/README.md` is equally readable as branch
+// `nate-ai` + path `generic-grafana-jump/README.md` or branch
+// `nate-ai/generic-grafana-jump` + path `README.md`, and
+// `/tree/renovate/all-patch` as the repo root at branch `renovate/all-patch` or
+// directory `all-patch` at branch `renovate`. Only the repo's real ref list
+// settles either, which is why the pure parsers can't: parseRepoFileContext()
+// takes the first segment, right on any ref without a slash and truncated on one
+// with, and parseRepoTreeRootContext() only reads the single-segment form at all.
 //
 // GitHub has already done that resolution to render the page, and states the
-// answer twice in the file view's own DOM (both confirmed against live
-// github.com, on a hard load and after a soft navigation that switched refs -
-// both are re-rendered by GitHub's client-side router, so neither goes stale):
+// answer twice in the page's own DOM - the same two places on a file view and on
+// a repo tree page (all confirmed against live github.com, on a hard load and
+// after a soft navigation that switched refs, including the branch-selector
+// switch from the repo home page that lands on `/tree/<ref>`; both are
+// re-rendered by GitHub's client-side router, so neither goes stale):
 //
 //   <button id="ref-picker-repos-header-ref-selector"
 //           aria-label="nate-ai/generic-grafana-jump branch" ...>
@@ -2129,19 +2188,20 @@ function scrapeRunBranch(context: JumpContext): string | undefined {
 // resolveDefaultBranch() above.
 //
 // Whichever source answers, the value is only trusted if it's a valid reading of
-// the URL on screen (see refMatchesBlobPath()), so a value belonging to some
-// other page can't win. When neither source answers - GitHub changes this markup,
-// or it hasn't rendered yet - there's no override and the truncated
-// first-segment reading stands, i.e. exactly today's behavior. Nothing here
-// guesses a ref.
+// the URL on screen (see refMatchesBlobPath() and refMatchesTreeRootPath()), so a
+// value belonging to some other page can't win. When neither source answers -
+// GitHub changes this markup, or it hasn't rendered yet - there's no override: a
+// file view keeps its truncated first-segment reading, and an ambiguous
+// `/tree/<a>/<b>` URL stays unmatched rather than being guessed at as either a
+// slashed ref or a directory. Nothing here guesses a ref.
 // ---------------------------------------------------------------------------
 
-const BLOB_REF_SELECTOR = "#ref-picker-repos-header-ref-selector";
-const BLOB_EMBEDDED_DATA_SELECTOR = 'script[type="application/json"][data-target="react-app.embeddedData"]';
+const REF_PICKER_SELECTOR = "#ref-picker-repos-header-ref-selector";
+const EMBEDDED_DATA_SELECTOR = 'script[type="application/json"][data-target="react-app.embeddedData"]';
 
 /**
- * The ref name out of the file view's ref-picker button's `aria-label`, which
- * reads `<full ref name> branch` (or `... tag`), or null if the label isn't in
+ * The ref name out of the ref-picker button's `aria-label`, which reads
+ * `<full ref name> branch` (or `... tag`), or null if the label isn't in
  * that shape. Read from the label rather than the button's text because the text
  * is truncated for display. The name is matched greedily so a ref literally
  * named `something branch` still yields the whole name.
@@ -2152,10 +2212,10 @@ function refNameFromRefSelectorLabel(label: string): string | null {
 }
 
 /**
- * The ref name out of the file view's embedded React payload, or null if it
- * isn't in there. Matched by regex rather than parsed as JSON and walked,
- * because `refInfo` sits under whichever route key the payload happens to be
- * built around (`payload.codeViewBlobLayoutRoute.refInfo` and
+ * The ref name out of the page's embedded React payload, or null if it isn't in
+ * there. Matched by regex rather than parsed as JSON and walked, because
+ * `refInfo` sits under whichever route key the payload happens to be built
+ * around (`payload.codeViewBlobLayoutRoute.refInfo` and
  * `payload.codeViewLayoutRoute.refInfo` both carry it today) - the same reason
  * resolveDefaultBranch() regexes for `defaultBranch`. A ref name can contain
  * characters JSON escapes, so escape sequences are consumed as part of the value
@@ -2217,32 +2277,113 @@ function refMatchesBlobPath(pathname: string, ref: string): string | null {
 }
 
 /**
+ * Whether `ref` is a valid reading of a repo tree page's URL - i.e. everything
+ * after `/tree/`, decoded and rejoined, is exactly `ref` with nothing left over.
+ * Returns the ref when it is and null when it isn't.
+ *
+ * Simpler than refMatchesBlobPath() because there's no path to leave room for:
+ * this only ever answers "is this URL the repo root at `ref`", and a leftover
+ * segment means it's a directory below the root instead - a page this script
+ * doesn't handle, so it must not match. A trailing slash is ignored, and (as on a
+ * file view) a slash inside the ref can arrive percent-encoded within one segment
+ * rather than as a literal separator, so the comparison is on the decoded,
+ * rejoined name.
+ */
+function refMatchesTreeRootPath(pathname: string, ref: string): string | null {
+  const match = pathname.match(/^\/[^/]+\/[^/]+\/tree\/(.+?)\/?$/);
+  if (!match) return null;
+
+  let candidate: string;
+  try {
+    candidate = match[1].split("/").map(decodeURIComponent).join("/");
+  } catch {
+    // A malformed percent-escape can't be compared against a ref name; treat it
+    // as no match rather than letting decodeURIComponent throw out of here.
+    return null;
+  }
+  return candidate === ref ? ref : null;
+}
+
+/**
+ * Both refs the current page's own DOM states, in the order they're tried. Every
+ * caller tries them all in turn rather than only the first one with a value, so a
+ * source that answers with something that doesn't match the URL can't shadow one
+ * that answers correctly.
+ */
+function domRefCandidates(): (string | null)[] {
+  const label = document.querySelector(REF_PICKER_SELECTOR)?.getAttribute("aria-label");
+  const embedded = document.querySelector(EMBEDDED_DATA_SELECTOR)?.textContent;
+  return [
+    label ? refNameFromRefSelectorLabel(label) : null,
+    embedded ? refNameFromEmbeddedData(embedded) : null,
+  ];
+}
+
+/**
  * The ref a file view is at, read from the live DOM, or undefined if this isn't
  * a file view or neither DOM source gives a ref that matches the URL. Like
  * scrapeRunBranch(), called on every checkLocation() pass rather than awaited
  * once, so an element that hasn't rendered yet is simply picked up on a later
  * DOM mutation.
- *
- * Both sources are tried in turn, rather than only the first one that has a
- * value, so a source that answers with something that doesn't match the URL
- * doesn't shadow one that answers correctly.
  */
 function scrapeBlobRef(context: JumpContext, pathname: string): string | undefined {
   if (context.kind !== "repoFile") return undefined;
 
-  const label = document.querySelector(BLOB_REF_SELECTOR)?.getAttribute("aria-label");
-  const embedded = document.querySelector(BLOB_EMBEDDED_DATA_SELECTOR)?.textContent;
-  const candidates = [
-    label ? refNameFromRefSelectorLabel(label) : null,
-    embedded ? refNameFromEmbeddedData(embedded) : null,
-  ];
-
-  for (const candidate of candidates) {
+  for (const candidate of domRefCandidates()) {
     if (!candidate) continue;
     const ref = refMatchesBlobPath(pathname, candidate);
     if (ref) return ref;
   }
   return undefined;
+}
+
+/**
+ * The repo home context a `/tree/<ref>` URL resolves to when its ref spans more
+ * than one path segment, which parseRepoTreeRootContext() can't read on its own -
+ * or null when the page's own DOM doesn't say a ref that accounts for the whole
+ * URL, which is exactly the case where the URL is a directory below the root
+ * rather than the root at a slashed ref.
+ *
+ * Unlike scrapeBlobRef()/scrapeRunBranch(), which only correct the ref of a
+ * context that already matched, this decides whether there's a context at all -
+ * so it's consulted only after the pure resolution has come up empty (see
+ * resolveJumpContextFromPage()), never in a position to reinterpret a page that
+ * already matched on its URL alone.
+ */
+function scrapeRepoTreeRootContext(pathname: string): RepoHomeContext | null {
+  const match = pathname.match(/^\/([^/]+)\/([^/]+)\/tree\/.+$/);
+  if (!match) return null;
+  const [, org, repo] = match;
+
+  for (const candidate of domRefCandidates()) {
+    if (!candidate) continue;
+    const ref = refMatchesTreeRootPath(pathname, candidate);
+    if (ref) return { kind: "repoHome", org, repo, branch: ref };
+  }
+  return null;
+}
+
+/**
+ * The current page's jump context, including the one reading of a URL that needs
+ * the DOM to settle: a repo root at a ref containing a slash, which no reading of
+ * the URL alone can tell apart from a directory view (see
+ * scrapeRepoTreeRootContext()).
+ */
+function resolveJumpContextFromPage(pathname: string, search: string): JumpContext | null {
+  return resolveJumpContext(pathname, search) ?? scrapeRepoTreeRootContext(pathname);
+}
+
+/**
+ * Whether this URL could still turn out to be a repo root at a slashed ref once
+ * the DOM says which ref it's at - i.e. the ambiguous multi-segment `/tree/`
+ * shape. Keeps checkLocation() re-checking on later DOM mutations instead of
+ * settling on "no context here" from a first pass that ran before GitHub's header
+ * had rendered. A URL that really is a directory view keeps being re-checked and
+ * keeps not matching, which costs two querySelectors per mutation and no DOM
+ * writes.
+ */
+function mayBeUnresolvedTreeRoot(pathname: string): boolean {
+  return /^\/[^/]+\/[^/]+\/tree\/[^/]+\/.+$/.test(pathname);
 }
 
 /**
@@ -2271,8 +2412,9 @@ function checkLocation(force = false): void {
   if (!locationChanged && !renderPending) return;
   lastLocationKey = locationKey;
 
-  const context = resolveJumpContext(pathname, search);
-  renderPending = renderJumpLinks(context);
+  const context = resolveJumpContextFromPage(pathname, search);
+  renderPending =
+    renderJumpLinks(context) || (context === null && mayBeUnresolvedTreeRoot(pathname));
 
   // Deliberately not gated on locationChanged: on a run page, and on a file view
   // at a ref containing a slash, the ref comes out of the DOM (see
@@ -2325,6 +2467,7 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     parseRepoHomeContext,
     parseRepoFileContext,
+    parseRepoTreeRootContext,
     parsePrContext,
     parsePrListContext,
     parseBranchListContext,
@@ -2350,6 +2493,8 @@ if (typeof module !== "undefined" && module.exports) {
     refNameFromRefSelectorLabel,
     refNameFromEmbeddedData,
     refMatchesBlobPath,
+    refMatchesTreeRootPath,
+    mayBeUnresolvedTreeRoot,
     activeLinks,
     mergeConfigsForExport,
     renderTemplate,
