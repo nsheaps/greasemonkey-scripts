@@ -1947,7 +1947,7 @@ __metadata:
   resolution: "greasemonkey-scripts@workspace:."
   dependencies:
     "@release-it/conventional-changelog": "npm:^11.0.1"
-    nx: "npm:~23.0.1"
+    nx: "npm:~23.0.2"
     oxlint: "npm:~1.73.0"
     release-it: "npm:^20.2.1"
     typescript: "npm:~7.0.2"
@@ -2476,7 +2476,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"nx@npm:~23.0.1":
+"nx@npm:~23.0.2":
   version: 23.0.2
   resolution: "nx@npm:23.0.2"
   dependencies:
