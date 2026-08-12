@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.12](https://github.com/nsheaps/greasemonkey-scripts/compare/release/last-run...0.2.12) (2026-08-12)
+
+### Bug Fixes
+
+* **github-actions-grafana-jump:** show jump links on the repo home page at a branch ([#54](https://github.com/nsheaps/greasemonkey-scripts/issues/54)) ([66031ec](https://github.com/nsheaps/greasemonkey-scripts/commit/66031ec52fc541a2672799bea12b8c9ee86876d8))
+
 ## [0.2.11](https://github.com/nsheaps/greasemonkey-scripts/compare/release/last-run...0.2.11) (2026-08-10)
 
 ### Bug Fixes
