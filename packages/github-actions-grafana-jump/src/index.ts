@@ -791,14 +791,25 @@ function applicableLinks(config: JumpLinksConfig, context: JumpContext): JumpLin
  * default branch (an absent `branch` here, i.e. the `HEAD` alias - see
  * repoConfigUrl()).
  *
- * Run and job pages are the exception that this pure function can't cover: a
- * run's ref isn't in its URL at all, only in the page's own DOM, so it's read
- * separately by scrapeRunBranch() and layered on top of this result.
+ * The pages this pure function can't cover are the ones whose ref isn't in their
+ * URL at all, only in their own DOM: a run page's ref (scrapeRunBranch()) and a
+ * pull request's head branch (scrapePrHeadBranch()), both layered on top of this
+ * result by repoConfigTarget().
  */
 interface RepoConfigTarget {
   org: string;
   repo: string;
   branch?: string;
+  /**
+   * Whether to read the default branch's config when `branch` has none of its
+   * own. Set only for a PR page's head branch, where the branch is the PR's
+   * rather than one you navigated to explicitly: a merged PR's head branch is
+   * usually deleted, so insisting on it would leave the page with no repo config
+   * where before it had the default branch's. On a page whose own URL names a ref
+   * there's no such fallback - that ref's version of the config is the answer,
+   * including when it doesn't have one.
+   */
+  fallBackToDefaultBranch?: boolean;
 }
 
 function repoContextForJump(context: JumpContext): RepoConfigTarget | null {
@@ -1233,6 +1244,22 @@ function repoConfigCacheKey(org: string, repo: string, branch?: string): string 
 }
 
 /**
+ * The key checkLocation() uses to decide whether the resolved target actually
+ * changed since the last pass - not just repoConfigCacheKey(), because that key
+ * only names org/repo/branch and ignores RepoConfigTarget.fallBackToDefaultBranch.
+ * Two targets with the same org/repo/branch but different fallback behavior are
+ * different targets: a file view on branch X reads that branch's config only,
+ * while a PR whose head branch is also X falls back to the default branch's
+ * config when X has none. Without the flag folded in here, navigating between
+ * those two pages would look like "nothing changed" and skip the re-resolve,
+ * leaving whichever page's result was fetched first displayed on both.
+ */
+function repoConfigTargetKey(target: RepoConfigTarget): string {
+  const cacheKey = repoConfigCacheKey(target.org, target.repo, target.branch);
+  return target.fallBackToDefaultBranch ? `${cacheKey}+fallback` : cacheKey;
+}
+
+/**
  * The raw.githubusercontent.com URL a repo's config file is read from, at the
  * given branch or (when none is given) at the default branch.
  *
@@ -1281,6 +1308,19 @@ function fetchRepoConfig(org: string, repo: string, branch?: string): Promise<Ju
   });
   repoConfigCache.set(key, promise);
   return promise;
+}
+
+/**
+ * The config for a resolved target: read at the ref the target names, falling
+ * back to the default branch when the target allows that and its ref has no
+ * config of its own (see RepoConfigTarget.fallBackToDefaultBranch). Both reads go
+ * through fetchRepoConfig()'s own cache, so the fallback costs one extra request
+ * once per repo rather than on every pass.
+ */
+function fetchRepoConfigForTarget(target: RepoConfigTarget): Promise<JumpLinksConfig | null> {
+  const atRef = fetchRepoConfig(target.org, target.repo, target.branch);
+  if (!target.fallBackToDefaultBranch || target.branch === undefined) return atRef;
+  return atRef.then((config) => config ?? fetchRepoConfig(target.org, target.repo));
 }
 
 const defaultBranchCache = new Map<string, Promise<string>>();
@@ -2113,13 +2153,15 @@ function renderJumpLinks(context: JumpContext | null): boolean {
 const RUN_BRANCH_SELECTOR = ".col-triggered-content a.branch-name";
 
 /**
- * The branch name a run header's branch link points at, or null if that href
- * isn't a branch in the given repo. Handles both forms GitHub writes: the fully
- * qualified `refs/heads/<branch>` this link currently uses, and a bare
- * `<branch>`. A ref in any other namespace (`refs/tags/...`) is not a branch and
- * is rejected rather than fetched as one.
+ * The branch name a `/<org>/<repo>/tree/<ref>` link points at, or null if that
+ * href isn't a branch in the given repo. Shared by the two headers that state a
+ * branch as such a link: a run page's trigger summary and a pull request's
+ * head-branch link (see scrapePrHeadBranch() below). Handles both forms GitHub
+ * writes: the fully qualified `refs/heads/<branch>` the run header uses, and the
+ * bare `<branch>` the PR header uses. A ref in any other namespace
+ * (`refs/tags/...`) is not a branch and is rejected rather than fetched as one.
  */
-function branchFromRunTreeHref(href: string, org: string, repo: string): string | null {
+function branchFromTreeHref(href: string, org: string, repo: string): string | null {
   const match = href.match(/^\/([^/]+)\/([^/]+)\/tree\/(.+)$/);
   if (!match) return null;
   const [, hrefOrg, hrefRepo, rawRef] = match;
@@ -2151,7 +2193,80 @@ function scrapeRunBranch(context: JumpContext): string | undefined {
   if (context.kind !== "run" && context.kind !== "job") return undefined;
   const href = document.querySelector(RUN_BRANCH_SELECTOR)?.getAttribute("href");
   if (!href) return undefined;
-  return branchFromRunTreeHref(href, context.org, context.repo) ?? undefined;
+  return branchFromTreeHref(href, context.org, context.repo) ?? undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Which branch a pull request is proposing. A PR page's URL carries only its
+// number, but the PR header states the whole merge - "<user> wants to merge N
+// commits into <base> from <head>" - with each branch as a link to its own tree,
+// confirmed against the live github.com DOM:
+//
+//   <div class="d-flex flex-items-center overflow-hidden gap-1">
+//     <a href="/nsheaps/greasemonkey-scripts/tree/n8bot/tree-view-repohome"
+//        data-component="BranchName" ...>n8bot/tree-view-repohome</a>
+//     <span data-component="Tooltip" ...>nsheaps/greasemonkey-scripts:n8bot/tree-view-repohome</span>
+//     <button data-component="IconButton" ...>   <!-- "Copy head branch name to clipboard" -->
+//   </div>
+//
+// Unlike the `/blob/<ref>/<path>` URLs that scrapeBlobRef() below has to
+// disambiguate, there's nothing ambiguous to resolve here: the branch name is a
+// whole href of its own, so a name containing a slash needs no special handling.
+//
+// The base branch is the same component rendered next to it, so which of the two
+// is the head is decided structurally rather than by position: only the head
+// branch has the "copy branch name" button beside it, as an element sibling of
+// the link itself. Matched on `data-component`, which is Primer React's own
+// attribute, rather than on the per-build hashed class names around it.
+//
+// A fork PR's head branch lives in the contributor's own repo, so its link points
+// at a different repo and branchFromTreeHref() rejects it - the same call the run
+// header makes for a fork-triggered run, for the same two reasons: that ref
+// doesn't exist in the repo being browsed, and a fork's copy of the config file
+// isn't this repo's config to read (anyone can open a fork PR, so treating one as
+// a source of links would let any contributor decide what the page offers).
+//
+// A merged or closed PR's head branch is usually deleted, and reading the config
+// at a branch that's gone would leave the page with no repo config at all where
+// before it had the default branch's - so a PR target is marked
+// fallBackToDefaultBranch, which covers that and any head branch that simply has
+// no config file of its own. Verified on a merged PR that the header still states
+// its (deleted) head branch the same way.
+// ---------------------------------------------------------------------------
+
+const PR_BRANCH_NAME_SELECTOR = 'a[data-component="BranchName"]';
+
+/**
+ * The href of the PR header's head-branch link, or null if it isn't in the DOM.
+ * The head branch is the one with the "copy branch name" `IconButton` beside it
+ * (see the DOM shape in the comment above); the base branch link has no such
+ * sibling. Matched on `data-component="IconButton"` rather than just the tag
+ * name, since a plain `<button>` check would also match some future unrelated
+ * button GitHub adds beside the link. Only the link's later siblings are
+ * checked - not the link itself, which is never its own sibling. Both the page
+ * header and the sticky header that appears when the page is scrolled carry the
+ * pair, so the first match wins - they state the same branch.
+ */
+function prHeadBranchHref(): string | null {
+  for (const link of document.querySelectorAll(PR_BRANCH_NAME_SELECTOR)) {
+    for (let sibling = link.nextElementSibling; sibling; sibling = sibling.nextElementSibling) {
+      if (sibling.getAttribute("data-component") === "IconButton") return link.getAttribute("href");
+    }
+  }
+  return null;
+}
+
+/**
+ * The head branch of the pull request a PR page is showing, read from the live
+ * DOM, or undefined if this isn't a PR page or the head branch isn't a branch of
+ * this repo (a fork PR) - or the header hasn't rendered yet, in which case a later
+ * DOM mutation picks it up, the same way scrapeRunBranch() does.
+ */
+function scrapePrHeadBranch(context: JumpContext): string | undefined {
+  if (context.kind !== "pr") return undefined;
+  const href = prHeadBranchHref();
+  if (!href) return undefined;
+  return branchFromTreeHref(href, context.org, context.repo) ?? undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -2389,11 +2504,19 @@ function mayBeUnresolvedTreeRoot(pathname: string): boolean {
 /**
  * Where to read the current page's repo config from - the ref its own URL names
  * (see repoContextForJump()), corrected by whichever ref the page's own DOM
- * carries: a run page's branch link, or a file view's resolved ref.
+ * carries: a run page's branch link, a file view's resolved ref, or a pull
+ * request's head branch.
+ *
+ * The PR case is the one that carries fallBackToDefaultBranch, so it's built
+ * separately rather than folded into the others.
  */
 function repoConfigTarget(context: JumpContext, pathname: string): RepoConfigTarget | null {
   const target = repoContextForJump(context);
   if (!target) return null;
+
+  const prHeadBranch = scrapePrHeadBranch(context);
+  if (prHeadBranch) return { ...target, branch: prHeadBranch, fallBackToDefaultBranch: true };
+
   const domRef = scrapeRunBranch(context) ?? scrapeBlobRef(context, pathname);
   return domRef ? { ...target, branch: domRef } : target;
 }
@@ -2416,20 +2539,20 @@ function checkLocation(force = false): void {
   renderPending =
     renderJumpLinks(context) || (context === null && mayBeUnresolvedTreeRoot(pathname));
 
-  // Deliberately not gated on locationChanged: on a run page, and on a file view
-  // at a ref containing a slash, the ref comes out of the DOM (see
+  // Deliberately not gated on locationChanged: on a run page, on a PR page, and
+  // on a file view at a ref containing a slash, the ref comes out of the DOM (see
   // repoConfigTarget()), which may only have rendered by a later mutation-driven
   // pass, at which point the config has to be re-read at that ref even though
   // the URL never changed. Every pass that resolves the same target as last time
   // stops at the key check just below, so re-checking here costs nothing.
   const repoCtx = context ? repoConfigTarget(context, pathname) : null;
-  const repoKey = repoCtx ? repoConfigCacheKey(repoCtx.org, repoCtx.repo, repoCtx.branch) : undefined;
+  const repoKey = repoCtx ? repoConfigTargetKey(repoCtx) : undefined;
   if (repoKey === currentRepoConfigKey) return;
 
   currentRepoConfigKey = repoKey;
   currentRepoConfig = null;
   if (repoCtx) {
-    void fetchRepoConfig(repoCtx.org, repoCtx.repo, repoCtx.branch).then((config) => {
+    void fetchRepoConfigForTarget(repoCtx).then((config) => {
       // Guard against a slow response landing after the user has already
       // navigated to a different repo (or one with no repo context at all).
       if (currentRepoConfigKey !== repoKey) return;
@@ -2488,8 +2611,10 @@ if (typeof module !== "undefined" && module.exports) {
     applicableLinks,
     repoContextForJump,
     repoConfigCacheKey,
+    repoConfigTargetKey,
     repoConfigUrl,
-    branchFromRunTreeHref,
+    fetchRepoConfigForTarget,
+    branchFromTreeHref,
     refNameFromRefSelectorLabel,
     refNameFromEmbeddedData,
     refMatchesBlobPath,

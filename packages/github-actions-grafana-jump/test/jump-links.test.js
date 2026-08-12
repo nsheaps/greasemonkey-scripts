@@ -33,8 +33,10 @@ const {
   applicableLinks,
   repoContextForJump,
   repoConfigCacheKey,
+  repoConfigTargetKey,
   repoConfigUrl,
-  branchFromRunTreeHref,
+  fetchRepoConfigForTarget,
+  branchFromTreeHref,
   refNameFromRefSelectorLabel,
   refNameFromEmbeddedData,
   refMatchesBlobPath,
@@ -728,6 +730,53 @@ test("repoConfigCacheKey keeps a branch's config separate from the default branc
   assert.notEqual(repoConfigCacheKey("o", "r"), repoConfigCacheKey("o", "r", "main"));
 });
 
+test("repoConfigTargetKey tells apart a strict target from a fallback one at the same branch", () => {
+  // A file view on branch X reads only X's own config. A PR whose head branch
+  // is also X falls back to the default branch's config when X has none - same
+  // org/repo/branch, different fetch behavior, so checkLocation()'s gate key
+  // must not treat them as the same target (see checkLocation() in src/index.ts).
+  const fileView = { org: "o", repo: "r", branch: "shared-branch" };
+  const prHead = { org: "o", repo: "r", branch: "shared-branch", fallBackToDefaultBranch: true };
+  assert.notEqual(repoConfigTargetKey(fileView), repoConfigTargetKey(prHead));
+  // Both still key off the same underlying repoConfigCacheKey() cache entry,
+  // since fetchRepoConfigForTarget()'s own fallback fetch reuses that cache.
+  assert.equal(repoConfigTargetKey(fileView), repoConfigCacheKey("o", "r", "shared-branch"));
+});
+
+test("cross-navigation between a file view and a same-branch PR fetches config differently each way", async () => {
+  // Reproduces the exact scenario from the automated review: navigating from a
+  // file view on branch X (strict, no fallback) to a PR whose head branch is
+  // also X (fallback allowed), and back again. Each direction must trigger its
+  // own fetch behavior rather than reusing the other's resolved target.
+  const fileView = { org: "o", repo: "nav-repro", branch: "shared-branch" };
+  const prHead = { org: "o", repo: "nav-repro", branch: "shared-branch", fallBackToDefaultBranch: true };
+  assert.notEqual(repoConfigTargetKey(fileView), repoConfigTargetKey(prHead));
+
+  // File view first: branch has no config of its own, and strict targets don't
+  // fall back, so the result is null.
+  const fileViewRun = await withStubbedFetch(
+    (url) => (url.includes("/HEAD/") ? 200 : 404),
+    () => fetchRepoConfigForTarget(fileView),
+  );
+  assert.equal(fileViewRun.result, null);
+
+  // Then navigate to the PR at the same head branch: the fallback target reads
+  // the default branch's config instead of also coming back null.
+  const prRun = await withStubbedFetch(
+    (url) => (url.includes("/HEAD/") ? 200 : 404),
+    () => fetchRepoConfigForTarget(prHead),
+  );
+  assert.deepEqual(linksForPage(prRun.result, "pr"), [{ name: "Dash", url: "https://example.test/d" }]);
+
+  // And back to the file view again: still strict, still null - the PR visit
+  // must not have left a fallback result stuck in place of it.
+  const fileViewAgain = await withStubbedFetch(
+    (url) => (url.includes("/HEAD/") ? 200 : 404),
+    () => fetchRepoConfigForTarget(fileView),
+  );
+  assert.equal(fileViewAgain.result, null);
+});
+
 test("repoConfigUrl reads the default branch when no branch is given", () => {
   assert.equal(
     repoConfigUrl("some-org", "some-repo"),
@@ -749,30 +798,120 @@ test("repoConfigUrl escapes characters that would otherwise change the URL", () 
   );
 });
 
-test("branchFromRunTreeHref reads the branch out of a run header's branch link", () => {
+// ---------------------------------------------------------------------------
+// Fetching a target's config. GM.xmlHttpRequest is stubbed per test (the real
+// one only exists in a script manager), and each test uses a repo name of its
+// own so the module-level response cache can't carry across tests.
+// ---------------------------------------------------------------------------
+
+/** Runs `body` with GM.xmlHttpRequest answering per `status(url)`, recording the URLs asked for. */
+async function withStubbedFetch(status, body) {
+  const requested = [];
+  globalThis.GM = {
+    xmlHttpRequest: ({ url, onload }) => {
+      requested.push(url);
+      onload({ status: status(url), responseText: "pages:\n  - page: pr\n    links:\n      - name: Dash\n        url: https://example.test/d\n" });
+    },
+  };
+  try {
+    return { result: await body(), requested };
+  } finally {
+    delete globalThis.GM;
+  }
+}
+
+test("fetchRepoConfigForTarget falls back to the default branch when a PR's head branch has no config", async () => {
+  const { result, requested } = await withStubbedFetch(
+    (url) => (url.includes("/HEAD/") ? 200 : 404),
+    () =>
+      fetchRepoConfigForTarget({
+        org: "o",
+        repo: "pr-fallback",
+        branch: "n8bot/deleted-after-merge",
+        fallBackToDefaultBranch: true,
+      }),
+  );
+  assert.deepEqual(linksForPage(result, "pr"), [{ name: "Dash", url: "https://example.test/d" }]);
+  assert.deepEqual(requested, [
+    repoConfigUrl("o", "pr-fallback", "n8bot/deleted-after-merge"),
+    repoConfigUrl("o", "pr-fallback"),
+  ]);
+});
+
+test("fetchRepoConfigForTarget stops at the head branch's own config when it has one", async () => {
+  const { requested } = await withStubbedFetch(
+    () => 200,
+    () =>
+      fetchRepoConfigForTarget({
+        org: "o",
+        repo: "pr-head-has-config",
+        branch: "n8bot/jump-links-config",
+        fallBackToDefaultBranch: true,
+      }),
+  );
+  assert.deepEqual(requested, [repoConfigUrl("o", "pr-head-has-config", "n8bot/jump-links-config")]);
+});
+
+test("fetchRepoConfigForTarget doesn't fall back for a ref the URL itself names", async () => {
+  const { result, requested } = await withStubbedFetch(
+    (url) => (url.includes("/HEAD/") ? 200 : 404),
+    () => fetchRepoConfigForTarget({ org: "o", repo: "blob-no-fallback", branch: "some/feature" }),
+  );
+  assert.equal(result, null);
+  assert.deepEqual(requested, [repoConfigUrl("o", "blob-no-fallback", "some/feature")]);
+});
+
+test("branchFromTreeHref reads the branch out of a run header's branch link", () => {
   assert.equal(
-    branchFromRunTreeHref("/nsheaps/greasemonkey-scripts/tree/refs/heads/renovate/all-patch", "nsheaps", "greasemonkey-scripts"),
+    branchFromTreeHref("/nsheaps/greasemonkey-scripts/tree/refs/heads/renovate/all-patch", "nsheaps", "greasemonkey-scripts"),
     "renovate/all-patch",
   );
   // The same link's shorter, unqualified form.
-  assert.equal(branchFromRunTreeHref("/o/r/tree/main", "o", "r"), "main");
-  assert.equal(branchFromRunTreeHref("/o/r/tree/some%2Fbranch", "o", "r"), "some/branch");
+  assert.equal(branchFromTreeHref("/o/r/tree/main", "o", "r"), "main");
+  assert.equal(branchFromTreeHref("/o/r/tree/some%2Fbranch", "o", "r"), "some/branch");
 });
 
-test("branchFromRunTreeHref ignores an owner/repo casing difference", () => {
-  assert.equal(branchFromRunTreeHref("/NSheaps/Some-Repo/tree/refs/heads/main", "nsheaps", "some-repo"), "main");
+test("branchFromTreeHref reads a PR header's head-branch link, slashes and all", () => {
+  // Captured from the live PR header on jouzen/android#28338 and
+  // nsheaps/greasemonkey-scripts#54: the head branch is one whole href, so a
+  // slashed name needs none of the disambiguation a /blob/<ref>/<path> URL does.
+  assert.equal(
+    branchFromTreeHref("/jouzen/android/tree/n8bot/jump-links-config", "jouzen", "android"),
+    "n8bot/jump-links-config",
+  );
+  assert.equal(
+    branchFromTreeHref(
+      "/nsheaps/greasemonkey-scripts/tree/n8bot/tree-view-repohome",
+      "nsheaps",
+      "greasemonkey-scripts",
+    ),
+    "n8bot/tree-view-repohome",
+  );
 });
 
-test("branchFromRunTreeHref rejects a href for a different repo, as a fork PR's head is", () => {
-  assert.equal(branchFromRunTreeHref("/someone-else/r/tree/refs/heads/main", "o", "r"), null);
-  assert.equal(branchFromRunTreeHref("/o/other-repo/tree/refs/heads/main", "o", "r"), null);
+test("branchFromTreeHref rejects a fork PR's head-branch link", () => {
+  // Captured from cli/cli#14108, whose head branch lives in the contributor's
+  // own fork (a differently-named repo at that) rather than in cli/cli.
+  assert.equal(
+    branchFromTreeHref("/loganrosen/cli-1/tree/loganrosen-fix-extension-saml-install", "cli", "cli"),
+    null,
+  );
 });
 
-test("branchFromRunTreeHref rejects a ref that isn't a branch, and a href that isn't a tree link", () => {
-  assert.equal(branchFromRunTreeHref("/o/r/tree/refs/tags/v1.0.0", "o", "r"), null);
-  assert.equal(branchFromRunTreeHref("/o/r/tree/refs/heads/", "o", "r"), null);
-  assert.equal(branchFromRunTreeHref("/o/r/blob/main/README.md", "o", "r"), null);
-  assert.equal(branchFromRunTreeHref("/o/r/tree/", "o", "r"), null);
+test("branchFromTreeHref ignores an owner/repo casing difference", () => {
+  assert.equal(branchFromTreeHref("/NSheaps/Some-Repo/tree/refs/heads/main", "nsheaps", "some-repo"), "main");
+});
+
+test("branchFromTreeHref rejects a href for a different repo, as a fork PR's head is", () => {
+  assert.equal(branchFromTreeHref("/someone-else/r/tree/refs/heads/main", "o", "r"), null);
+  assert.equal(branchFromTreeHref("/o/other-repo/tree/refs/heads/main", "o", "r"), null);
+});
+
+test("branchFromTreeHref rejects a ref that isn't a branch, and a href that isn't a tree link", () => {
+  assert.equal(branchFromTreeHref("/o/r/tree/refs/tags/v1.0.0", "o", "r"), null);
+  assert.equal(branchFromTreeHref("/o/r/tree/refs/heads/", "o", "r"), null);
+  assert.equal(branchFromTreeHref("/o/r/blob/main/README.md", "o", "r"), null);
+  assert.equal(branchFromTreeHref("/o/r/tree/", "o", "r"), null);
 });
 
 // ---------------------------------------------------------------------------
