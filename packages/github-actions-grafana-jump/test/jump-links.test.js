@@ -33,6 +33,7 @@ const {
   applicableLinks,
   repoContextForJump,
   repoConfigCacheKey,
+  repoConfigTargetKey,
   repoConfigUrl,
   fetchRepoConfigForTarget,
   branchFromTreeHref,
@@ -727,6 +728,53 @@ test("repoConfigCacheKey keeps a branch's config separate from the default branc
   assert.equal(repoConfigCacheKey("o", "r"), "o/r@HEAD");
   assert.equal(repoConfigCacheKey("o", "r", "some/feature"), "o/r@some/feature");
   assert.notEqual(repoConfigCacheKey("o", "r"), repoConfigCacheKey("o", "r", "main"));
+});
+
+test("repoConfigTargetKey tells apart a strict target from a fallback one at the same branch", () => {
+  // A file view on branch X reads only X's own config. A PR whose head branch
+  // is also X falls back to the default branch's config when X has none - same
+  // org/repo/branch, different fetch behavior, so checkLocation()'s gate key
+  // must not treat them as the same target (see checkLocation() in src/index.ts).
+  const fileView = { org: "o", repo: "r", branch: "shared-branch" };
+  const prHead = { org: "o", repo: "r", branch: "shared-branch", fallBackToDefaultBranch: true };
+  assert.notEqual(repoConfigTargetKey(fileView), repoConfigTargetKey(prHead));
+  // Both still key off the same underlying repoConfigCacheKey() cache entry,
+  // since fetchRepoConfigForTarget()'s own fallback fetch reuses that cache.
+  assert.equal(repoConfigTargetKey(fileView), repoConfigCacheKey("o", "r", "shared-branch"));
+});
+
+test("cross-navigation between a file view and a same-branch PR fetches config differently each way", async () => {
+  // Reproduces the exact scenario from the automated review: navigating from a
+  // file view on branch X (strict, no fallback) to a PR whose head branch is
+  // also X (fallback allowed), and back again. Each direction must trigger its
+  // own fetch behavior rather than reusing the other's resolved target.
+  const fileView = { org: "o", repo: "nav-repro", branch: "shared-branch" };
+  const prHead = { org: "o", repo: "nav-repro", branch: "shared-branch", fallBackToDefaultBranch: true };
+  assert.notEqual(repoConfigTargetKey(fileView), repoConfigTargetKey(prHead));
+
+  // File view first: branch has no config of its own, and strict targets don't
+  // fall back, so the result is null.
+  const fileViewRun = await withStubbedFetch(
+    (url) => (url.includes("/HEAD/") ? 200 : 404),
+    () => fetchRepoConfigForTarget(fileView),
+  );
+  assert.equal(fileViewRun.result, null);
+
+  // Then navigate to the PR at the same head branch: the fallback target reads
+  // the default branch's config instead of also coming back null.
+  const prRun = await withStubbedFetch(
+    (url) => (url.includes("/HEAD/") ? 200 : 404),
+    () => fetchRepoConfigForTarget(prHead),
+  );
+  assert.deepEqual(linksForPage(prRun.result, "pr"), [{ name: "Dash", url: "https://example.test/d" }]);
+
+  // And back to the file view again: still strict, still null - the PR visit
+  // must not have left a fallback result stuck in place of it.
+  const fileViewAgain = await withStubbedFetch(
+    (url) => (url.includes("/HEAD/") ? 200 : 404),
+    () => fetchRepoConfigForTarget(fileView),
+  );
+  assert.equal(fileViewAgain.result, null);
 });
 
 test("repoConfigUrl reads the default branch when no branch is given", () => {

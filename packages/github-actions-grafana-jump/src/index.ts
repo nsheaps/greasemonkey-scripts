@@ -1244,6 +1244,22 @@ function repoConfigCacheKey(org: string, repo: string, branch?: string): string 
 }
 
 /**
+ * The key checkLocation() uses to decide whether the resolved target actually
+ * changed since the last pass - not just repoConfigCacheKey(), because that key
+ * only names org/repo/branch and ignores RepoConfigTarget.fallBackToDefaultBranch.
+ * Two targets with the same org/repo/branch but different fallback behavior are
+ * different targets: a file view on branch X reads that branch's config only,
+ * while a PR whose head branch is also X falls back to the default branch's
+ * config when X has none. Without the flag folded in here, navigating between
+ * those two pages would look like "nothing changed" and skip the re-resolve,
+ * leaving whichever page's result was fetched first displayed on both.
+ */
+function repoConfigTargetKey(target: RepoConfigTarget): string {
+  const cacheKey = repoConfigCacheKey(target.org, target.repo, target.branch);
+  return target.fallBackToDefaultBranch ? `${cacheKey}+fallback` : cacheKey;
+}
+
+/**
  * The raw.githubusercontent.com URL a repo's config file is read from, at the
  * given branch or (when none is given) at the default branch.
  *
@@ -2222,16 +2238,19 @@ const PR_BRANCH_NAME_SELECTOR = 'a[data-component="BranchName"]';
 
 /**
  * The href of the PR header's head-branch link, or null if it isn't in the DOM.
- * The head branch is the one with the "copy branch name" button beside it; the
- * base branch link has no such button. Both the page header and the sticky header
- * that appears when the page is scrolled carry the pair, so the first match wins -
- * they state the same branch.
+ * The head branch is the one with the "copy branch name" `IconButton` beside it
+ * (see the DOM shape in the comment above); the base branch link has no such
+ * sibling. Matched on `data-component="IconButton"` rather than just the tag
+ * name, since a plain `<button>` check would also match some future unrelated
+ * button GitHub adds beside the link. Only the link's later siblings are
+ * checked - not the link itself, which is never its own sibling. Both the page
+ * header and the sticky header that appears when the page is scrolled carry the
+ * pair, so the first match wins - they state the same branch.
  */
 function prHeadBranchHref(): string | null {
   for (const link of document.querySelectorAll(PR_BRANCH_NAME_SELECTOR)) {
-    const siblings = link.parentElement?.children ?? [];
-    for (const sibling of siblings) {
-      if (sibling.tagName === "BUTTON") return link.getAttribute("href");
+    for (let sibling = link.nextElementSibling; sibling; sibling = sibling.nextElementSibling) {
+      if (sibling.getAttribute("data-component") === "IconButton") return link.getAttribute("href");
     }
   }
   return null;
@@ -2527,7 +2546,7 @@ function checkLocation(force = false): void {
   // the URL never changed. Every pass that resolves the same target as last time
   // stops at the key check just below, so re-checking here costs nothing.
   const repoCtx = context ? repoConfigTarget(context, pathname) : null;
-  const repoKey = repoCtx ? repoConfigCacheKey(repoCtx.org, repoCtx.repo, repoCtx.branch) : undefined;
+  const repoKey = repoCtx ? repoConfigTargetKey(repoCtx) : undefined;
   if (repoKey === currentRepoConfigKey) return;
 
   currentRepoConfigKey = repoKey;
@@ -2592,6 +2611,7 @@ if (typeof module !== "undefined" && module.exports) {
     applicableLinks,
     repoContextForJump,
     repoConfigCacheKey,
+    repoConfigTargetKey,
     repoConfigUrl,
     fetchRepoConfigForTarget,
     branchFromTreeHref,
