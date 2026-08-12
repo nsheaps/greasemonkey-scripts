@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.13](https://github.com/nsheaps/greasemonkey-scripts/compare/release/last-run...0.2.13) (2026-08-12)
+
+### Bug Fixes
+
+* **github-actions-grafana-jump:** read a PR page's jump-links config from the PR's own branch ([#55](https://github.com/nsheaps/greasemonkey-scripts/issues/55)) ([215ef50](https://github.com/nsheaps/greasemonkey-scripts/commit/215ef50c69dee7aadc6b0ebb59322b58121e82ec))
+
 ## [0.2.12](https://github.com/nsheaps/greasemonkey-scripts/compare/release/last-run...0.2.12) (2026-08-12)
 
 ### Bug Fixes
