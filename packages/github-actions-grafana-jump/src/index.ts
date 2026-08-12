@@ -12,7 +12,7 @@
 // are all just URLs you write out in full, with `{{fieldKey}}` placeholders
 // wherever a page value belongs.
 //
-// Links are configured per GitHub page kind (a PR page, a workflow run page, a
+// Links are configured per GitHub page (a PR page, a workflow run page, a
 // branch list page, ...) rather than inferred, so a link only ever shows up
 // where you said it should. Configuration comes from two places: your own
 // personal config, edited in an in-page panel and persisted via
