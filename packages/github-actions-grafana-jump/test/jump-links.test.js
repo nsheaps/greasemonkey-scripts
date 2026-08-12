@@ -63,62 +63,62 @@ const {
 // ---------------------------------------------------------------------------
 
 test("parseRepoHomeContext matches a repo's own landing page", () => {
-  assert.deepEqual(parseRepoHomeContext("/oura/some-repo"), {
+  assert.deepEqual(parseRepoHomeContext("/some-org/some-repo"), {
     kind: "repoHome",
-    org: "oura",
+    org: "some-org",
     repo: "some-repo",
   });
-  assert.deepEqual(parseRepoHomeContext("/oura/some-repo/"), {
+  assert.deepEqual(parseRepoHomeContext("/some-org/some-repo/"), {
     kind: "repoHome",
-    org: "oura",
+    org: "some-org",
     repo: "some-repo",
   });
 });
 
 test("parseRepoHomeContext does not match deeper paths or GitHub's own global pages", () => {
-  assert.equal(parseRepoHomeContext("/oura/some-repo/pulls"), null);
-  assert.equal(parseRepoHomeContext("/oura"), null);
-  assert.equal(parseRepoHomeContext("/organizations/oura"), null);
+  assert.equal(parseRepoHomeContext("/some-org/some-repo/pulls"), null);
+  assert.equal(parseRepoHomeContext("/some-org"), null);
+  assert.equal(parseRepoHomeContext("/organizations/some-org"), null);
   assert.equal(parseRepoHomeContext("/settings/profile"), null);
   assert.equal(parseRepoHomeContext("/notifications/subscriptions"), null);
 });
 
 test("parseRepoFileContext matches a file at a ref and decodes the ref", () => {
-  assert.deepEqual(parseRepoFileContext("/oura/some-repo/blob/main/README.md"), {
+  assert.deepEqual(parseRepoFileContext("/some-org/some-repo/blob/main/README.md"), {
     kind: "repoFile",
-    org: "oura",
+    org: "some-org",
     repo: "some-repo",
     branch: "main",
   });
-  assert.deepEqual(parseRepoFileContext("/oura/some-repo/blob/my%2Fbranch/src/index.ts"), {
+  assert.deepEqual(parseRepoFileContext("/some-org/some-repo/blob/my%2Fbranch/src/index.ts"), {
     kind: "repoFile",
-    org: "oura",
+    org: "some-org",
     repo: "some-repo",
     branch: "my/branch",
   });
 });
 
 test("parseRepoFileContext does not match a directory view or a bare ref", () => {
-  assert.equal(parseRepoFileContext("/oura/some-repo/tree/main/src"), null);
-  assert.equal(parseRepoFileContext("/oura/some-repo/blob/main"), null);
+  assert.equal(parseRepoFileContext("/some-org/some-repo/tree/main/src"), null);
+  assert.equal(parseRepoFileContext("/some-org/some-repo/blob/main"), null);
 });
 
 test("parseRepoTreeRootContext reads the repo root at a ref as its home page", () => {
-  assert.deepEqual(parseRepoTreeRootContext("/oura/some-repo/tree/main"), {
+  assert.deepEqual(parseRepoTreeRootContext("/some-org/some-repo/tree/main"), {
     kind: "repoHome",
-    org: "oura",
+    org: "some-org",
     repo: "some-repo",
     branch: "main",
   });
-  assert.deepEqual(parseRepoTreeRootContext("/oura/some-repo/tree/main/"), {
+  assert.deepEqual(parseRepoTreeRootContext("/some-org/some-repo/tree/main/"), {
     kind: "repoHome",
-    org: "oura",
+    org: "some-org",
     repo: "some-repo",
     branch: "main",
   });
-  assert.deepEqual(parseRepoTreeRootContext("/oura/some-repo/tree/renovate%2Fall-patch"), {
+  assert.deepEqual(parseRepoTreeRootContext("/some-org/some-repo/tree/renovate%2Fall-patch"), {
     kind: "repoHome",
-    org: "oura",
+    org: "some-org",
     repo: "some-repo",
     branch: "renovate/all-patch",
   });
@@ -128,21 +128,21 @@ test("parseRepoTreeRootContext leaves an ambiguous multi-segment tree URL alone"
   // "/tree/renovate/all-patch" is equally the root at ref "renovate/all-patch"
   // or directory "all-patch" at ref "renovate"; only the ref in the page's own
   // DOM settles it, so nothing is matched from the URL alone here.
-  assert.equal(parseRepoTreeRootContext("/oura/some-repo/tree/renovate/all-patch"), null);
-  assert.equal(parseRepoTreeRootContext("/oura/some-repo/tree/main/packages"), null);
-  assert.equal(parseRepoTreeRootContext("/oura/some-repo/tree"), null);
-  assert.equal(parseRepoTreeRootContext("/oura/some-repo"), null);
+  assert.equal(parseRepoTreeRootContext("/some-org/some-repo/tree/renovate/all-patch"), null);
+  assert.equal(parseRepoTreeRootContext("/some-org/some-repo/tree/main/packages"), null);
+  assert.equal(parseRepoTreeRootContext("/some-org/some-repo/tree"), null);
+  assert.equal(parseRepoTreeRootContext("/some-org/some-repo"), null);
 });
 
 test("parsePrContext matches the PR checks tab and other PR sub-tabs", () => {
   for (const pathname of [
-    "/oura/some-repo/pull/42",
-    "/oura/some-repo/pull/42/checks",
-    "/oura/some-repo/pull/42/files",
+    "/some-org/some-repo/pull/42",
+    "/some-org/some-repo/pull/42/checks",
+    "/some-org/some-repo/pull/42/files",
   ]) {
     assert.deepEqual(parsePrContext(pathname), {
       kind: "pr",
-      org: "oura",
+      org: "some-org",
       repo: "some-repo",
       prNumber: "42",
     });
@@ -150,31 +150,31 @@ test("parsePrContext matches the PR checks tab and other PR sub-tabs", () => {
 });
 
 test("parsePrContext does not match non-PR paths", () => {
-  assert.equal(parsePrContext("/oura/some-repo/pulls"), null);
-  assert.equal(parsePrContext("/oura/some-repo/issues/42"), null);
-  assert.equal(parsePrContext("/oura/some-repo/actions"), null);
+  assert.equal(parsePrContext("/some-org/some-repo/pulls"), null);
+  assert.equal(parsePrContext("/some-org/some-repo/issues/42"), null);
+  assert.equal(parsePrContext("/some-org/some-repo/actions"), null);
 });
 
 test("parsePrListContext matches the repo's PR list", () => {
-  assert.deepEqual(parsePrListContext("/oura/some-repo/pulls"), {
+  assert.deepEqual(parsePrListContext("/some-org/some-repo/pulls"), {
     kind: "prList",
-    org: "oura",
+    org: "some-org",
     repo: "some-repo",
   });
-  assert.deepEqual(parsePrListContext("/oura/some-repo/pulls/"), {
+  assert.deepEqual(parsePrListContext("/some-org/some-repo/pulls/"), {
     kind: "prList",
-    org: "oura",
+    org: "some-org",
     repo: "some-repo",
   });
-  assert.equal(parsePrListContext("/oura/some-repo/pull/42"), null);
+  assert.equal(parsePrListContext("/some-org/some-repo/pull/42"), null);
 });
 
 test("parseBranchListContext matches the branch list and its sub-tabs", () => {
-  const expected = { kind: "branchList", org: "oura", repo: "some-repo" };
-  assert.deepEqual(parseBranchListContext("/oura/some-repo/branches"), expected);
-  assert.deepEqual(parseBranchListContext("/oura/some-repo/branches/all"), expected);
-  assert.deepEqual(parseBranchListContext("/oura/some-repo/branches/yours"), expected);
-  assert.equal(parseBranchListContext("/oura/some-repo/branch_commits/abc"), null);
+  const expected = { kind: "branchList", org: "some-org", repo: "some-repo" };
+  assert.deepEqual(parseBranchListContext("/some-org/some-repo/branches"), expected);
+  assert.deepEqual(parseBranchListContext("/some-org/some-repo/branches/all"), expected);
+  assert.deepEqual(parseBranchListContext("/some-org/some-repo/branches/yours"), expected);
+  assert.equal(parseBranchListContext("/some-org/some-repo/branch_commits/abc"), null);
 });
 
 test("extractBranchFromQuery reads bare and quoted branch filters", () => {
@@ -185,134 +185,134 @@ test("extractBranchFromQuery reads bare and quoted branch filters", () => {
 });
 
 test("parseBranchContext matches the repo Actions tab filtered by branch", () => {
-  assert.deepEqual(parseBranchContext("/oura/some-repo/actions", "?query=branch%3Amy-feature"), {
+  assert.deepEqual(parseBranchContext("/some-org/some-repo/actions", "?query=branch%3Amy-feature"), {
     kind: "branch",
-    org: "oura",
+    org: "some-org",
     repo: "some-repo",
     branch: "my-feature",
   });
-  assert.deepEqual(parseBranchContext("/oura/some-repo/actions/", "?query=is%3Asuccess+branch%3Amain"), {
+  assert.deepEqual(parseBranchContext("/some-org/some-repo/actions/", "?query=is%3Asuccess+branch%3Amain"), {
     kind: "branch",
-    org: "oura",
+    org: "some-org",
     repo: "some-repo",
     branch: "main",
   });
 });
 
 test("parseBranchContext returns null without a branch filter or off the bare Actions tab", () => {
-  assert.equal(parseBranchContext("/oura/some-repo/actions", ""), null);
-  assert.equal(parseBranchContext("/oura/some-repo/actions", "?query=is%3Asuccess"), null);
-  assert.equal(parseBranchContext("/oura/some-repo/actions/workflows/ci.yml", "?query=branch%3Amain"), null);
+  assert.equal(parseBranchContext("/some-org/some-repo/actions", ""), null);
+  assert.equal(parseBranchContext("/some-org/some-repo/actions", "?query=is%3Asuccess"), null);
+  assert.equal(parseBranchContext("/some-org/some-repo/actions/workflows/ci.yml", "?query=branch%3Amain"), null);
 });
 
 test("parseActionsListContext matches the repo Actions tab", () => {
-  assert.deepEqual(parseActionsListContext("/oura/some-repo/actions"), {
+  assert.deepEqual(parseActionsListContext("/some-org/some-repo/actions"), {
     kind: "actionsList",
-    org: "oura",
+    org: "some-org",
     repo: "some-repo",
   });
-  assert.equal(parseActionsListContext("/oura/some-repo/actions/workflows/ci.yml"), null);
+  assert.equal(parseActionsListContext("/some-org/some-repo/actions/workflows/ci.yml"), null);
 });
 
 test("parseRunnerContext matches repo-scoped and org-scoped runner pages", () => {
-  assert.deepEqual(parseRunnerContext("/oura/some-repo/settings/actions/runners/17"), {
+  assert.deepEqual(parseRunnerContext("/some-org/some-repo/settings/actions/runners/17"), {
     kind: "runner",
     scope: "repo",
-    org: "oura",
+    org: "some-org",
     repo: "some-repo",
     runnerId: "17",
   });
-  assert.deepEqual(parseRunnerContext("/organizations/oura/settings/actions/runners/17"), {
+  assert.deepEqual(parseRunnerContext("/organizations/some-org/settings/actions/runners/17"), {
     kind: "runner",
     scope: "org",
-    org: "oura",
+    org: "some-org",
     runnerId: "17",
   });
 });
 
 test("parseRunnerContext returns null off a runner detail page", () => {
-  assert.equal(parseRunnerContext("/oura/some-repo/settings/actions"), null);
-  assert.equal(parseRunnerContext("/organizations/oura/settings/actions/runner-groups/1"), null);
+  assert.equal(parseRunnerContext("/some-org/some-repo/settings/actions"), null);
+  assert.equal(parseRunnerContext("/organizations/some-org/settings/actions/runner-groups/1"), null);
 });
 
 test("parseRunnerGroupContext matches an org's runner group detail page", () => {
-  assert.deepEqual(parseRunnerGroupContext("/organizations/oura/settings/actions/runner-groups/3"), {
+  assert.deepEqual(parseRunnerGroupContext("/organizations/some-org/settings/actions/runner-groups/3"), {
     kind: "runnerGroup",
-    org: "oura",
+    org: "some-org",
     groupId: "3",
   });
-  assert.equal(parseRunnerGroupContext("/organizations/oura/settings/actions/runners/3"), null);
+  assert.equal(parseRunnerGroupContext("/organizations/some-org/settings/actions/runners/3"), null);
 });
 
 test("parseWorkflowContext matches a workflow's own page", () => {
-  assert.deepEqual(parseWorkflowContext("/oura/some-repo/actions/workflows/ci.yml"), {
+  assert.deepEqual(parseWorkflowContext("/some-org/some-repo/actions/workflows/ci.yml"), {
     kind: "workflow",
-    org: "oura",
+    org: "some-org",
     repo: "some-repo",
     workflowFile: "ci.yml",
   });
-  assert.equal(parseWorkflowContext("/oura/some-repo/actions"), null);
+  assert.equal(parseWorkflowContext("/some-org/some-repo/actions"), null);
 });
 
 test("parseRunContext distinguishes a run's own page from one job within it", () => {
-  assert.deepEqual(parseRunContext("/oura/some-repo/actions/runs/123456"), {
+  assert.deepEqual(parseRunContext("/some-org/some-repo/actions/runs/123456"), {
     kind: "run",
-    org: "oura",
+    org: "some-org",
     repo: "some-repo",
     runId: "123456",
   });
-  assert.deepEqual(parseRunContext("/oura/some-repo/actions/runs/123456/job/789"), {
+  assert.deepEqual(parseRunContext("/some-org/some-repo/actions/runs/123456/job/789"), {
     kind: "job",
-    org: "oura",
+    org: "some-org",
     repo: "some-repo",
     runId: "123456",
     jobId: "789",
   });
-  assert.equal(parseRunContext("/oura/some-repo/actions/workflows/ci.yml"), null);
+  assert.equal(parseRunContext("/some-org/some-repo/actions/workflows/ci.yml"), null);
 });
 
 test("resolveJumpContext dispatches to the right parser for each supported URL shape", () => {
   const cases = [
-    ["/oura/some-repo", "", { kind: "repoHome", org: "oura", repo: "some-repo" }],
+    ["/some-org/some-repo", "", { kind: "repoHome", org: "some-org", repo: "some-repo" }],
     [
-      "/oura/some-repo/blob/main/README.md",
+      "/some-org/some-repo/blob/main/README.md",
       "",
-      { kind: "repoFile", org: "oura", repo: "some-repo", branch: "main" },
+      { kind: "repoFile", org: "some-org", repo: "some-repo", branch: "main" },
     ],
     [
-      "/oura/some-repo/tree/main",
+      "/some-org/some-repo/tree/main",
       "",
-      { kind: "repoHome", org: "oura", repo: "some-repo", branch: "main" },
+      { kind: "repoHome", org: "some-org", repo: "some-repo", branch: "main" },
     ],
-    ["/oura/some-repo/pull/42", "", { kind: "pr", org: "oura", repo: "some-repo", prNumber: "42" }],
-    ["/oura/some-repo/pulls", "", { kind: "prList", org: "oura", repo: "some-repo" }],
-    ["/oura/some-repo/branches", "", { kind: "branchList", org: "oura", repo: "some-repo" }],
-    ["/oura/some-repo/actions", "", { kind: "actionsList", org: "oura", repo: "some-repo" }],
+    ["/some-org/some-repo/pull/42", "", { kind: "pr", org: "some-org", repo: "some-repo", prNumber: "42" }],
+    ["/some-org/some-repo/pulls", "", { kind: "prList", org: "some-org", repo: "some-repo" }],
+    ["/some-org/some-repo/branches", "", { kind: "branchList", org: "some-org", repo: "some-repo" }],
+    ["/some-org/some-repo/actions", "", { kind: "actionsList", org: "some-org", repo: "some-repo" }],
     [
-      "/oura/some-repo/actions",
+      "/some-org/some-repo/actions",
       "?query=branch%3Amain",
-      { kind: "branch", org: "oura", repo: "some-repo", branch: "main" },
+      { kind: "branch", org: "some-org", repo: "some-repo", branch: "main" },
     ],
     [
-      "/oura/some-repo/actions/workflows/ci.yml",
+      "/some-org/some-repo/actions/workflows/ci.yml",
       "",
-      { kind: "workflow", org: "oura", repo: "some-repo", workflowFile: "ci.yml" },
+      { kind: "workflow", org: "some-org", repo: "some-repo", workflowFile: "ci.yml" },
     ],
-    ["/oura/some-repo/actions/runs/9", "", { kind: "run", org: "oura", repo: "some-repo", runId: "9" }],
+    ["/some-org/some-repo/actions/runs/9", "", { kind: "run", org: "some-org", repo: "some-repo", runId: "9" }],
     [
-      "/oura/some-repo/actions/runs/9/job/1",
+      "/some-org/some-repo/actions/runs/9/job/1",
       "",
-      { kind: "job", org: "oura", repo: "some-repo", runId: "9", jobId: "1" },
-    ],
-    [
-      "/organizations/oura/settings/actions/runners/9",
-      "",
-      { kind: "runner", scope: "org", org: "oura", runnerId: "9" },
+      { kind: "job", org: "some-org", repo: "some-repo", runId: "9", jobId: "1" },
     ],
     [
-      "/organizations/oura/settings/actions/runner-groups/2",
+      "/organizations/some-org/settings/actions/runners/9",
       "",
-      { kind: "runnerGroup", org: "oura", groupId: "2" },
+      { kind: "runner", scope: "org", org: "some-org", runnerId: "9" },
+    ],
+    [
+      "/organizations/some-org/settings/actions/runner-groups/2",
+      "",
+      { kind: "runnerGroup", org: "some-org", groupId: "2" },
     ],
   ];
   for (const [pathname, search, expected] of cases) {
@@ -321,11 +321,11 @@ test("resolveJumpContext dispatches to the right parser for each supported URL s
 });
 
 test("resolveJumpContext returns null for pages with no jump context", () => {
-  assert.equal(resolveJumpContext("/oura/some-repo/issues/1", ""), null);
+  assert.equal(resolveJumpContext("/some-org/some-repo/issues/1", ""), null);
   // A directory below the repo root is a different page with a different header,
   // and stays unmatched however deep it goes.
-  assert.equal(resolveJumpContext("/oura/some-repo/tree/main/src", ""), null);
-  assert.equal(resolveJumpContext("/oura/some-repo/tree/main/packages/some-package", ""), null);
+  assert.equal(resolveJumpContext("/some-org/some-repo/tree/main/src", ""), null);
+  assert.equal(resolveJumpContext("/some-org/some-repo/tree/main/packages/some-package", ""), null);
   assert.equal(resolveJumpContext("/", ""), null);
 });
 
@@ -341,18 +341,18 @@ test("resolveJumpContext covers every declared page kind", () => {
 /** The URL shape each page kind is reached by, resolved back to its kind. */
 function resolveJumpContextForSample(page) {
   const urls = {
-    repoHome: ["/oura/some-repo", ""],
-    repoFile: ["/oura/some-repo/blob/main/README.md", ""],
-    pr: ["/oura/some-repo/pull/42", ""],
-    prList: ["/oura/some-repo/pulls", ""],
-    branchList: ["/oura/some-repo/branches", ""],
-    actionsList: ["/oura/some-repo/actions", ""],
-    branch: ["/oura/some-repo/actions", "?query=branch%3Amain"],
-    workflow: ["/oura/some-repo/actions/workflows/ci.yml", ""],
-    run: ["/oura/some-repo/actions/runs/9", ""],
-    job: ["/oura/some-repo/actions/runs/9/job/1", ""],
-    runner: ["/oura/some-repo/settings/actions/runners/1", ""],
-    runnerGroup: ["/organizations/oura/settings/actions/runner-groups/1", ""],
+    repoHome: ["/some-org/some-repo", ""],
+    repoFile: ["/some-org/some-repo/blob/main/README.md", ""],
+    pr: ["/some-org/some-repo/pull/42", ""],
+    prList: ["/some-org/some-repo/pulls", ""],
+    branchList: ["/some-org/some-repo/branches", ""],
+    actionsList: ["/some-org/some-repo/actions", ""],
+    branch: ["/some-org/some-repo/actions", "?query=branch%3Amain"],
+    workflow: ["/some-org/some-repo/actions/workflows/ci.yml", ""],
+    run: ["/some-org/some-repo/actions/runs/9", ""],
+    job: ["/some-org/some-repo/actions/runs/9/job/1", ""],
+    runner: ["/some-org/some-repo/settings/actions/runners/1", ""],
+    runnerGroup: ["/organizations/some-org/settings/actions/runner-groups/1", ""],
   }[page];
   assert.ok(urls, `no example URL for page kind ${page}`);
   return resolveJumpContext(urls[0], urls[1])?.kind;
