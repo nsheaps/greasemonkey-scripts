@@ -75,11 +75,29 @@ RELEASE_IT="$ROOT_DIR/node_modules/.bin/release-it"
 # @downloadURL/@updateURL fix that restored GreasyFork sync changed only this
 # script and would have shipped nothing on its own.
 SHARED_BUILD_INPUTS=("scripts/build-userscript.mjs")
+
+# These are used as git PATHSPECS below, and a pathspec that matches nothing is
+# not an error - `git diff -- some/renamed/path` exits 0 with no output. So a
+# renamed or moved entry here would degrade silently to "no shared input
+# changed", which is precisely the ship-nothing failure this whole mechanism
+# exists to prevent, just re-armed under a different trigger. Verify each entry
+# resolves at HEAD first, so a stale entry fails loudly instead.
+for input in "${SHARED_BUILD_INPUTS[@]}"; do
+  if ! git cat-file -e "HEAD:$input" 2>/dev/null; then
+    echo "::error::SHARED_BUILD_INPUTS entry '$input' does not exist at HEAD - update scripts/auto-bump-packages.sh" >&2
+    exit 1
+  fi
+done
+
 SHARED_CHANGED=false
 if git diff --name-only "$CHANGE_BASE..HEAD" -- "${SHARED_BUILD_INPUTS[@]}" 2>/dev/null | grep -q .; then
   SHARED_CHANGED=true
   echo "shared build input changed: every published package counts as changed" >&2
 fi
+
+# Single source of truth for "is this package published?" - see
+# scripts/publishable-packages.sh for why this is not spelled out inline.
+PUBLISHABLE="$(scripts/publishable-packages.sh)"
 
 # Compute the next patch version for a semver string (major.minor.patch).
 next_patch() {
@@ -102,7 +120,11 @@ for pkg_dir in packages/*/; do
   # Whether this package is in the release pipeline. Computed up front but
   # not gated on yet - the manual-bump check just below applies to every
   # package so a hand-bumped internal package still shows up in the preview.
-  opted_in="$(node -pe "require('./$pjson').greasyforkPublish === true" 2>/dev/null || echo false)"
+  if printf '%s\n' "$PUBLISHABLE" | grep -qxF "$name"; then
+    opted_in=true
+  else
+    opted_in=false
+  fi
 
   base_version="$(git show "$VERSION_BASE:$pjson" 2>/dev/null \
     | node -pe "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo '0.0.0')"

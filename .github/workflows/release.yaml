@@ -230,7 +230,6 @@ jobs:
         run: yarn run build
 
       - name: Commit built userscripts for GreasyFork sync
-        id: dist-commit
         if: steps.bump.outputs.has-bumps == 'true'
         env:
           GIT_AUTHOR_NAME: ${{ steps.auth.outputs.user-name }}
@@ -239,33 +238,37 @@ jobs:
           GIT_COMMITTER_EMAIL: ${{ steps.auth.outputs.user-email }}
         run: |
           set -euo pipefail
-          # dist/ is gitignored for normal development. Force-add just the
-          # built files GreasyFork needs to read via `git show`.
-          for pkg_dir in packages/*/; do
-            pkg_name="$(basename "$pkg_dir")"
-            pjson="${pkg_dir}package.json"
-            [ -f "$pjson" ] || continue
-            opted_in="$(node -pe "require('./$pjson').greasyforkPublish === true" 2>/dev/null || echo false)"
-            [ "$opted_in" = "true" ] || continue
+          # Which packages are published is answered in exactly one place -
+          # see scripts/publishable-packages.sh. Captured into a variable
+          # rather than piped/process-substituted so that a failure in the
+          # helper aborts this step under `set -e` instead of silently
+          # feeding the loop an empty list.
+          PUBLISHABLE="$(scripts/publishable-packages.sh)"
+          if [ -z "$PUBLISHABLE" ]; then
+            echo "::error::no packages have greasyforkPublish set, but a release was cut - nothing would be published"
+            exit 1
+          fi
 
+          while read -r pkg_name; do
             src="packages/${pkg_name}/dist/script.user.js"
             if [ ! -f "$src" ]; then
               echo "::error::greasyforkPublish is set for $pkg_name but $src is missing after build"
               exit 1
             fi
+            # dist/ is gitignored for normal development, so this one needs -f.
             git add -f "$src"
 
             # Flat root-level mirror, named to match each package's
             # @downloadURL/@updateURL asset name - see the contract comment at
             # the top of this file for why GreasyFork's release-webhook sync
             # reads this exact path instead of the nested
-            # packages/<pkg>/dist/ one.
+            # packages/<pkg>/dist/ one. No -f here: nothing in .gitignore
+            # covers <name>.user.js at repo root.
             root_copy="${pkg_name}.user.js"
             cp "$src" "$root_copy"
-            git add -f "$root_copy"
-          done
+            git add "$root_copy"
+          done <<< "$PUBLISHABLE"
           git commit -m "chore(release): include built userscripts for GreasyFork sync [skip ci]"
-          echo "dist-sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Tag release
         id: tag
@@ -351,13 +354,13 @@ jobs:
           # script's release moves "latest" past it, even though its own code
           # never changed. `yarn run build` above already built every
           # package, bumped or not.
-          for pkg_dir in packages/*/; do
-            pkg_name="$(basename "$pkg_dir")"
-            pjson="${pkg_dir}package.json"
-            [ -f "$pjson" ] || continue
-            opted_in="$(node -pe "require('./$pjson').greasyforkPublish === true" 2>/dev/null || echo false)"
-            [ "$opted_in" = "true" ] || continue
+          PUBLISHABLE="$(scripts/publishable-packages.sh)"
+          if [ -z "$PUBLISHABLE" ]; then
+            echo "::error::no packages have greasyforkPublish set, but a release was cut - nothing would be uploaded"
+            exit 1
+          fi
 
+          while read -r pkg_name; do
             # Rename to <package-dir-name>.user.js so several packages' assets
             # coexist on one release and each matches the fixed
             # .../releases/latest/download/<name>.user.js URL baked into that
@@ -365,12 +368,8 @@ jobs:
             # GreasyFork's sync round-trip requires (see the contract comment
             # at the top of this file).
             src="packages/${pkg_name}/dist/script.user.js"
-            if [ ! -f "$src" ]; then
-              echo "::error::greasyforkPublish is set for $pkg_name but $src is missing after build"
-              exit 1
-            fi
             dest="${UPLOAD_DIR}/${pkg_name}.user.js"
             cp "$src" "$dest"
             echo "Uploading $dest to $RELEASE_TAG"
             gh release upload "$RELEASE_TAG" "$dest" --repo "${{ github.repository }}" --clobber
-          done
+          done <<< "$PUBLISHABLE"
