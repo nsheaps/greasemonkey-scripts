@@ -18,24 +18,55 @@ name: Release
 # lint/format commit that would trigger another bump.
 #
 # A second commit, stacked on top of the bump commit but never merged into
-# main, adds the built .user.js files to git at their normal
-# packages/<pkg>/dist/ path (no flat root-level mirror needed - see below).
-# Tagging that commit as the release tag, and moving the floating `latest`
-# tag onto it, gives GreasyFork a git ref it can read the real nested path
-# from, without ever putting build artifacts in main's history.
+# main, adds the built .user.js files to git: each at its normal
+# packages/<pkg>/dist/ path, AND mirrored flat at repo root as
+# <pkg>.user.js. Tagging that commit (as the release tag, and as the
+# floating `latest` tag) gives GreasyFork a git ref it can read the flat
+# path from, without ever putting build artifacts in main's history.
 #
-# Each package's @downloadURL/@updateURL points at
-# https://raw.githubusercontent.com/<org>/<repo>/latest/packages/<pkg>/dist/script.user.js.
-# On GreasyFork's "release published" webhook, it strips the domain+org+repo
-# prefix from that URL, then discards exactly one more path segment as the
-# ref (see lib/github.rb#file_from_root_for_url in GreasyFork's source) -
-# here that's the `latest` segment - leaving `packages/<pkg>/dist/script.user.js`
-# as the real git path, which it then reads with `git show <release-tag>:<path>`
-# (a server-side git operation, not an HTTP fetch of the stored URL - the
-# `latest` segment is never itself dereferenced by that fetch, only by other
-# tools like Tampermonkey polling @updateURL directly). Since the dist commit
-# already places the file at that exact nested path, no flat mirror or
-# release-asset upload is needed.
+# ---------------------------------------------------------------------------
+# GreasyFork's release-webhook sync contract - READ BEFORE CHANGING ANY URL
+# ---------------------------------------------------------------------------
+# Every published package's @downloadURL/@updateURL is
+# https://github.com/<org>/<repo>/releases/latest/download/<pkg>.user.js,
+# and that same URL is what each script's account-side "sync from URL" on
+# GreasyFork must be set to. That exact shape is load-bearing. On a
+# "release published" webhook, GreasyFork (lib/github.rb,
+# app/controllers/concerns/webhooks.rb) does a ROUND TRIP:
+#
+#   1. It lists the sync URLs it already has for this repo, and reduces each
+#      to a repo-root-relative git path with `file_from_root_for_url` - which
+#      strips the repo/host prefix and then discards exactly one more path
+#      segment as the ref. For the URL above that yields `<pkg>.user.js`.
+#   2. It REGENERATES candidate URLs from that path with `urls_for_ref`, once
+#      using the release's own tag_name and once using the default branch,
+#      and then matches scripts with `sync_identifier IN (<those URLs>)` -
+#      byte equality, not a prefix match.
+#   3. Only for matched scripts does it read the content, via
+#      `git show <release-tag>:<path>` server-side (not an HTTP fetch of the
+#      stored URL).
+#
+# Step 2 is the trap. `.../releases/latest/download/` is the ONE base form
+# `urls_for_ref` special-cases to emit with no ref segment appended, so it
+# round-trips back to itself and matches. Every other supported form
+# (github.com/<org>/<repo>/raw/..., raw.githubusercontent.com/<org>/<repo>/...)
+# is regenerated with the release tag or the default branch substituted into
+# the ref slot - so a sync URL naming any OTHER ref can never be reproduced
+# and never matches. That is exactly how this broke before: pointing the URLs
+# at raw.githubusercontent.com/<org>/<repo>/latest/packages/<pkg>/dist/... got
+# step 1 right but silently failed step 2, because `latest` is neither the
+# release tag (release/<timestamp>) nor the default branch (main), so every
+# webhook delivery came back "No scripts found." and no script ever synced.
+#
+# Step 3 is why the flat root-level mirror below exists: the path from step 1
+# is `<pkg>.user.js`, so that is the path GreasyFork asks git for at the
+# release tag. Step 1 discards the packages/<pkg>/dist/ nesting, so the
+# nested copy alone is not readable through this URL form.
+#
+# The release-asset upload at the end of this job is a separate requirement:
+# GreasyFork reads content from git, but Tampermonkey/Greasemonkey users who
+# installed straight from GitHub poll @updateURL over plain HTTP, and that
+# URL only resolves if the asset is actually attached to the latest release.
 
 on:
   push:
@@ -199,7 +230,6 @@ jobs:
         run: yarn run build
 
       - name: Commit built userscripts for GreasyFork sync
-        id: dist-commit
         if: steps.bump.outputs.has-bumps == 'true'
         env:
           GIT_AUTHOR_NAME: ${{ steps.auth.outputs.user-name }}
@@ -208,24 +238,37 @@ jobs:
           GIT_COMMITTER_EMAIL: ${{ steps.auth.outputs.user-email }}
         run: |
           set -euo pipefail
-          # dist/ is gitignored for normal development. Force-add just the
-          # built files GreasyFork needs to read via `git show`.
-          for pkg_dir in packages/*/; do
-            pkg_name="$(basename "$pkg_dir")"
-            pjson="${pkg_dir}package.json"
-            [ -f "$pjson" ] || continue
-            opted_in="$(node -pe "require('./$pjson').greasyforkPublish === true" 2>/dev/null || echo false)"
-            [ "$opted_in" = "true" ] || continue
+          # Which packages are published is answered in exactly one place -
+          # see scripts/publishable-packages.sh. Captured into a variable
+          # rather than piped/process-substituted so that a failure in the
+          # helper aborts this step under `set -e` instead of silently
+          # feeding the loop an empty list.
+          PUBLISHABLE="$(scripts/publishable-packages.sh)"
+          if [ -z "$PUBLISHABLE" ]; then
+            echo "::error::no packages have greasyforkPublish set, but a release was cut - nothing would be published"
+            exit 1
+          fi
 
+          while read -r pkg_name; do
             src="packages/${pkg_name}/dist/script.user.js"
             if [ ! -f "$src" ]; then
               echo "::error::greasyforkPublish is set for $pkg_name but $src is missing after build"
               exit 1
             fi
+            # dist/ is gitignored for normal development, so this one needs -f.
             git add -f "$src"
-          done
+
+            # Flat root-level mirror, named to match each package's
+            # @downloadURL/@updateURL asset name - see the contract comment at
+            # the top of this file for why GreasyFork's release-webhook sync
+            # reads this exact path instead of the nested
+            # packages/<pkg>/dist/ one. No -f here: nothing in .gitignore
+            # covers <name>.user.js at repo root.
+            root_copy="${pkg_name}.user.js"
+            cp "$src" "$root_copy"
+            git add "$root_copy"
+          done <<< "$PUBLISHABLE"
           git commit -m "chore(release): include built userscripts for GreasyFork sync [skip ci]"
-          echo "dist-sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Tag release
         id: tag
@@ -243,21 +286,23 @@ jobs:
           #
           # JUDGEMENT CALL: one shared release per run, not one per package.
           # Every published script's @downloadURL points at the stable
-          # .../latest/packages/<pkg>/dist/script.user.js path. Per-package
-          # tags would make "latest" ambiguous - whichever package released
-          # most recently would win, and the other scripts' download URLs
-          # would resolve to a release commit that predates their own most
-          # recent build. Moving "latest" onto every dist commit (not just
-          # ones with bumps for that package - the dist commit above rebuilds
-          # every greasyforkPublish package) keeps every script's download URL
-          # resolvable. Per-package provenance is not lost: each package
-          # keeps its own version in its package.json and its own
-          # CHANGELOG.md.
+          # .../releases/latest/download/<pkg>.user.js path. Per-package tags
+          # would make "latest" ambiguous - whichever package released most
+          # recently would win, and the other scripts' download URLs would
+          # resolve to a release that has no asset for them. That's also why
+          # the upload step below re-uploads every greasyforkPublish package's
+          # asset on every run, not just the ones bumped this run: "latest" is
+          # one shared pointer, so leaving an unchanged package out would make
+          # its download URL 404 the instant any other package's release moved
+          # past it. Per-package provenance is not lost: each package keeps
+          # its own version in its package.json and its own CHANGELOG.md.
           RELEASE_TAG="release/$(date -u +%Y%m%d-%H%M%S)"
           git tag -a "$RELEASE_TAG" -m "Release $RELEASE_TAG"
-          # Floating tag every package's @downloadURL/@updateURL resolves
-          # through (raw.githubusercontent.com/<org>/<repo>/latest/...) so
-          # each script's URL never has to change again.
+          # Floating tag kept pointing at the newest dist commit. Nothing in
+          # this pipeline resolves through it any more, but it is what the
+          # raw.githubusercontent.com/<org>/<repo>/latest/packages/<pkg>/dist/
+          # URLs shipped between #40 and this change point at, so anyone who
+          # installed a script during that window keeps getting updates.
           git tag -f "latest" HEAD
           # release/last-run stays on the bump commit (not the dist commit) -
           # it's the base the NEXT run diffs source changes against.
@@ -291,3 +336,40 @@ jobs:
             --title "$RELEASE_TAG" \
             --notes-file /tmp/release-notes.md \
             --latest
+
+      - name: Upload userscripts as release assets
+        if: steps.bump.outputs.has-bumps == 'true'
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.token }}
+          RELEASE_TAG: ${{ steps.tag.outputs.release-tag }}
+        run: |
+          set -euo pipefail
+          UPLOAD_DIR="$(mktemp -d)"
+
+          # Every greasyforkPublish package gets its asset re-uploaded on
+          # every release, not just the ones bumped this run. "latest" is one
+          # shared pointer across all published scripts' @downloadURL and
+          # GreasyFork sync identifiers - a script left out here would vanish
+          # from releases/latest/download/<name>.user.js the moment any OTHER
+          # script's release moves "latest" past it, even though its own code
+          # never changed. `yarn run build` above already built every
+          # package, bumped or not.
+          PUBLISHABLE="$(scripts/publishable-packages.sh)"
+          if [ -z "$PUBLISHABLE" ]; then
+            echo "::error::no packages have greasyforkPublish set, but a release was cut - nothing would be uploaded"
+            exit 1
+          fi
+
+          while read -r pkg_name; do
+            # Rename to <package-dir-name>.user.js so several packages' assets
+            # coexist on one release and each matches the fixed
+            # .../releases/latest/download/<name>.user.js URL baked into that
+            # package's own @downloadURL/@updateURL - which is also the URL
+            # GreasyFork's sync round-trip requires (see the contract comment
+            # at the top of this file).
+            src="packages/${pkg_name}/dist/script.user.js"
+            dest="${UPLOAD_DIR}/${pkg_name}.user.js"
+            cp "$src" "$dest"
+            echo "Uploading $dest to $RELEASE_TAG"
+            gh release upload "$RELEASE_TAG" "$dest" --repo "${{ github.repository }}" --clobber
+          done <<< "$PUBLISHABLE"
