@@ -55,15 +55,31 @@ This repository uses a monorepo structure with the following setup:
 - A patch bump is applied to each package whose files changed since the last
   release. Bumping a version by hand in a PR (e.g. for a minor or major
   release) is respected and not bumped again on top.
-- Each release run also commits every published package's built
-  `dist/script.user.js`, tags it, and moves a floating `latest` tag onto that
-  commit. Published scripts point their `@downloadURL`/`@updateURL` at
-  `https://raw.githubusercontent.com/nsheaps/greasemonkey-scripts/latest/packages/<package-name>/dist/script.user.js`,
+- Each release run cuts one shared GitHub Release, attaches every published
+  package's built script to it as `<package-name>.user.js`, and also commits
+  those built files at a tagged (but never merged) commit - both at
+  `packages/<package-name>/dist/script.user.js` and mirrored flat at repo root
+  as `<package-name>.user.js`.
+- Published scripts point their `@downloadURL`/`@updateURL` at
+  `https://github.com/nsheaps/greasemonkey-scripts/releases/latest/download/<package-name>.user.js`,
   so a userscript manager installed directly from GitHub auto-updates from
-  there. [GreasyFork](https://greasyfork.org/en/scripts?by=1372068) forcibly
-  rewrites those same fields for any script actually listed on its site, so
-  the existing GreasyFork listings keep updating through GreasyFork's own
-  mechanism instead - this pipeline doesn't change that.
+  there.
+- That same URL is what each script's **"sync from URL"** setting on
+  [GreasyFork](https://greasyfork.org/en/scripts?by=1372068) must be set to
+  (an account-side setting, not something this repo can change). GreasyFork's
+  release webhook only syncs a script when it can regenerate that script's
+  stored sync URL byte-for-byte from the release payload, and
+  `releases/latest/download/...` is the only supported URL form that contains
+  no branch/tag segment - so it is the only one that stays stable across
+  releases. A sync URL pointing at any other ref (a raw blob at `latest`, at a
+  version tag, ...) silently never matches and the script never updates. See
+  the contract comment at the top of `.github/workflows/release.yaml` before
+  changing any of these URLs.
+- GreasyFork rewrites `@downloadURL`/`@updateURL` in the copy it serves, so
+  people who installed a script *from* GreasyFork update through GreasyFork
+  regardless. That only decides where an installed script polls - it is not
+  what gets a new version into GreasyFork in the first place, which is what
+  the sync URL above is for.
 - `yarn bump` runs the same bump logic locally; pass `--preview` to see what
   would happen without writing anything.
 

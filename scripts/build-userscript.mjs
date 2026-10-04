@@ -28,6 +28,16 @@ import { basename, resolve } from "node:path";
 const REPO_ORG = "nsheaps";
 const REPO_NAME = "greasemonkey-scripts";
 
+// DO NOT change the SHAPE of this URL without re-reading the contract in
+// .github/workflows/release.yaml. GreasyFork's release-webhook sync matches a
+// script only when its account-side "sync from URL" value is byte-identical to
+// a URL GreasyFork itself regenerates, and `releases/latest/download/<file>` is
+// the only supported form that carries no branch/tag segment - every other form
+// is regenerated with the release tag or the default branch substituted in, so
+// a URL naming any other ref (`latest`, a version tag, ...) can never match.
+const releaseAssetUrl = (assetName) =>
+  `https://github.com/${REPO_ORG}/${REPO_NAME}/releases/latest/download/${assetName}`;
+
 const pkgDir = process.cwd();
 const readJson = (relPath) =>
   JSON.parse(readFileSync(resolve(pkgDir, relPath), "utf8"));
@@ -56,8 +66,10 @@ for (const key of ["downloadURL", "updateURL"]) {
 }
 
 // The last segment of the package root is the directory name under packages/,
-// which is the path GreasyFork and Tampermonkey fetch the built script from.
-const scriptUrl = `https://raw.githubusercontent.com/${REPO_ORG}/${REPO_NAME}/latest/packages/${basename(pkgDir)}/dist/script.user.js`;
+// which the release workflow also uses as the release asset's name (and as the
+// name of the flat repo-root copy GreasyFork reads out of the release tag), so
+// several packages' assets can coexist on one shared release.
+const scriptUrl = releaseAssetUrl(`${basename(pkgDir)}.user.js`);
 
 // Always emit whatever package.json currently holds. Between releases that is
 // the last released version, which is honest for a local build, and on a
