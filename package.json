@@ -13,7 +13,7 @@
   "devDependencies": {
     "@release-it/conventional-changelog": "^12.0.2",
     "nx": "~23.2.1",
-    "oxlint": "~1.82.0",
+    "oxlint": "~1.83.0",
     "release-it": "^21.0.3",
     "typescript": "~7.0.2"
   },
