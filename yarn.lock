@@ -389,7 +389,7 @@ __metadata:
   resolution: "@nsheaps/gm-github-actions-grafana-jump@workspace:packages/github-actions-grafana-jump"
   dependencies:
     "@types/greasemonkey": "npm:~4.0.7"
-    "@types/node": "npm:~24.13.4"
+    "@types/node": "npm:~24.13.5"
   languageName: unknown
   linkType: soft
 
@@ -810,7 +810,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@types/node@npm:~24.13.4":
+"@types/node@npm:~24.13.5":
   version: 24.13.6
   resolution: "@types/node@npm:24.13.6"
   dependencies:
