@@ -61,6 +61,44 @@ echo "Version comparison base: $VERSION_BASE" >&2
 
 RELEASE_IT="$ROOT_DIR/node_modules/.bin/release-it"
 
+# Shared build inputs: files outside packages/ whose content is baked into
+# EVERY published script.user.js. scripts/build-userscript.mjs renders the
+# `// ==UserScript==` metablock (@version, @downloadURL, @updateURL, ...) into
+# each package's artifact, so changing it changes every published artifact's
+# bytes even when no package's own files moved.
+#
+# Without this, per-package change detection below - which only looks inside
+# packages/<pkg>/ - would report "no package changes detected", has_bumps would
+# be false, and the release job would skip every step. A fix to the header
+# would merge and then silently never reach anyone, because nothing would
+# rebuild or republish. That is a real failure mode, not a hypothetical: the
+# @downloadURL/@updateURL fix that restored GreasyFork sync changed only this
+# script and would have shipped nothing on its own.
+SHARED_BUILD_INPUTS=("scripts/build-userscript.mjs")
+
+# These are used as git PATHSPECS below, and a pathspec that matches nothing is
+# not an error - `git diff -- some/renamed/path` exits 0 with no output. So a
+# renamed or moved entry here would degrade silently to "no shared input
+# changed", which is precisely the ship-nothing failure this whole mechanism
+# exists to prevent, just re-armed under a different trigger. Verify each entry
+# resolves at HEAD first, so a stale entry fails loudly instead.
+for input in "${SHARED_BUILD_INPUTS[@]}"; do
+  if ! git cat-file -e "HEAD:$input" 2>/dev/null; then
+    echo "::error::SHARED_BUILD_INPUTS entry '$input' does not exist at HEAD - update scripts/auto-bump-packages.sh" >&2
+    exit 1
+  fi
+done
+
+SHARED_CHANGED=false
+if git diff --name-only "$CHANGE_BASE..HEAD" -- "${SHARED_BUILD_INPUTS[@]}" 2>/dev/null | grep -q .; then
+  SHARED_CHANGED=true
+  echo "shared build input changed: every published package counts as changed" >&2
+fi
+
+# Single source of truth for "is this package published?" - see
+# scripts/publishable-packages.sh for why this is not spelled out inline.
+PUBLISHABLE="$(scripts/publishable-packages.sh)"
+
 # Compute the next patch version for a semver string (major.minor.patch).
 next_patch() {
   local v="$1" a b c
@@ -82,7 +120,11 @@ for pkg_dir in packages/*/; do
   # Whether this package is in the release pipeline. Computed up front but
   # not gated on yet - the manual-bump check just below applies to every
   # package so a hand-bumped internal package still shows up in the preview.
-  opted_in="$(node -pe "require('./$pjson').greasyforkPublish === true" 2>/dev/null || echo false)"
+  if printf '%s\n' "$PUBLISHABLE" | grep -qxF "$name"; then
+    opted_in=true
+  else
+    opted_in=false
+  fi
 
   base_version="$(git show "$VERSION_BASE:$pjson" 2>/dev/null \
     | node -pe "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo '0.0.0')"
@@ -129,12 +171,15 @@ for pkg_dir in packages/*/; do
   # further to detect or report.
   [ "$opted_in" = "true" ] || continue
 
-  # A package counts as "changed" if any of its files, other than
-  # package.json and CHANGELOG.md, differ from the change base. We skip
-  # those two files so that a previous version-bump commit doesn't trigger
-  # another bump on its own. We only get here after already checking above
-  # for a hand-bumped version, so this check never hides one of those.
-  if ! git diff --name-only "$CHANGE_BASE..HEAD" -- "$pkg_dir" 2>/dev/null \
+  # A package counts as "changed" if a shared build input changed (see
+  # SHARED_BUILD_INPUTS above - that rewrites every published artifact), or if
+  # any of its own files, other than package.json and CHANGELOG.md, differ from
+  # the change base. We skip those two files so that a previous version-bump
+  # commit doesn't trigger another bump on its own. We only get here after
+  # already checking above for a hand-bumped version, so this check never hides
+  # one of those.
+  if [ "$SHARED_CHANGED" = false ] \
+    && ! git diff --name-only "$CHANGE_BASE..HEAD" -- "$pkg_dir" 2>/dev/null \
       | grep -vE '(^|/)(package\.json|CHANGELOG\.md)$' | grep -q .; then
     continue
   fi
